@@ -1,0 +1,21 @@
+# Build output
+/build/
+/dist/
+/dist-test/
+*.spec.bak
+
+# Environments
+/.venv/
+/.venv-managed/
+__pycache__/
+*.py[cod]
+
+# Tooling caches
+/.pytest_cache/
+/.ruff_cache/
+*.egg-info/
+
+# Never commit these: the release signing key, and any real credentials.
+*.pem
+*.key
+credentials.json

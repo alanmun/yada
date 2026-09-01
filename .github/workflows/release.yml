@@ -1,0 +1,159 @@
+name: Release
+
+# Tag a commit to publish. The archive produced here serves two purposes: it is what a new
+# user downloads and what the in-app updater fetches. Keeping them the same file means the
+# update path is exercised by every release rather than only when someone tests it.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (without a leading v)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 deliberately: a binary built against an older glibc runs on newer distros,
+          # but not the other way round.
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            archive: tar.gz
+          - os: windows-latest
+            platform: windows-x86_64
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "value=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Qt and audio runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-keysyms1 libxcb-shape0 libportaudio2 libdbus-1-3
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Build the application
+        run: uv run pyinstaller --noconfirm --clean packaging/yada.spec
+
+      - name: Build the launcher
+        run: uv run pyinstaller --noconfirm --clean packaging/yada-launcher.spec
+
+      - name: Assemble the payload
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -eu
+          # One archive, two jobs: the installer scripts make it a first-time install, and
+          # the app plus _internal make it an update payload.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp dist/yada-launcher.exe dist/yada/yada-launcher.exe
+            cp packaging/install.ps1 dist/yada/install.ps1
+          else
+            cp dist/yada-launcher dist/yada/yada-launcher
+            chmod +x dist/yada/yada-launcher dist/yada/yada
+            cp packaging/install.sh dist/yada/install.sh
+            chmod +x dist/yada/install.sh
+          fi
+          # Sanity check: extract_release refuses an archive without this, so fail here
+          # instead of shipping something no client will install.
+          test -f "dist/yada/yada" || test -f "dist/yada/yada.exe"
+          printf '%s\n' "$VERSION" > dist/yada/VERSION
+
+      - name: Archive
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -eu
+          NAME="yada-${VERSION}-${{ matrix.platform }}"
+          mkdir -p out
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "../out/${NAME}.zip" yada
+          else
+            tar -czf "../out/${NAME}.tar.gz" yada
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yada-${{ matrix.platform }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+          merge-multiple: true
+
+      - name: Checksum
+        working-directory: staging
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Sign the checksum manifest
+        # The signature is what lets a client distinguish a release the maintainer published
+        # from one anybody with repository write access pushed. Without the secret the job
+        # fails rather than publishing something clients will refuse to install.
+        env:
+          YADA_SIGNING_KEY: ${{ secrets.YADA_SIGNING_KEY }}
+        run: |
+          if [ -z "${YADA_SIGNING_KEY}" ]; then
+            echo "::error::YADA_SIGNING_KEY is not set. Run scripts/gen_signing_key.py and add it."
+            exit 1
+          fi
+          uv run --with cryptography python scripts/sign_release.py staging/SHA256SUMS
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "value=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          gh release create "v${VERSION}" staging/* \
+            --title "yada ${VERSION}" \
+            --generate-notes \
+            --notes "Installed copies of yada will pick this up automatically in the background and use it at next launch."

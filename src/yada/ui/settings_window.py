@@ -1,0 +1,684 @@
+"""The settings window.
+
+Not part of the normal flow -- yada lives in the tray -- so this is optimised for being
+understood on the rare visit rather than for density. Every non-obvious option carries a
+one-line explanation underneath, and anything that depends on the session (whether the
+shortcut registered, whether pasting is possible, when models were last discovered) reports
+its actual state rather than presenting a control that may quietly do nothing.
+
+Closing this window hides it. Only the tray's Quit action exits, which is the specific
+behaviour Whispering gets wrong on Windows.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .. import secrets
+from ..audio import list_input_devices
+from ..config import Settings
+from ..hotkey import toggle_command
+from ..output import create_paste_backend
+from ..pipeline.transform import DEFAULT_SYSTEM_PROMPT, default_steps
+from ..providers.base import ReasoningEffort, ServiceTier, Support
+from ..providers.registry import PLANNED, SPECS
+from .steps_editor import StepsEditor
+from .widgets import (
+    ModelPicker,
+    PromptEditor,
+    StringListEditor,
+    SupportCheckBox,
+    button_row,
+    hint,
+    labelled,
+)
+
+PASTE_MODES = [
+    ("off", "Never paste automatically"),
+    ("after_transcription", "Paste as soon as the transcript is ready"),
+    ("after_transformation", "Paste after the AI cleanup finishes"),
+]
+
+
+def _scrollable(inner: QWidget) -> QScrollArea:
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    area.setWidget(inner)
+    return area
+
+
+class SettingsWindow(QWidget):
+    saved = Signal(object)  # Settings
+    refresh_models_requested = Signal(str)  # "transcription" | "transform"
+    key_changed = Signal(str)  # provider id
+    test_provider_requested = Signal(str)  # provider id
+    check_updates_requested = Signal()
+
+    def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("yada settings")
+        self.resize(760, 620)
+        self._settings = dataclasses.replace(settings)
+        self._key_fields: dict[str, QLineEdit] = {}
+        self._key_status: dict[str, QLabel] = {}
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(_scrollable(self._build_providers()), "Providers")
+        self.tabs.addTab(_scrollable(self._build_transcription()), "Transcription")
+        self.tabs.addTab(self._build_transform(), "Cleanup")
+        self.tabs.addTab(_scrollable(self._build_vocabulary()), "Vocabulary")
+        self.tabs.addTab(_scrollable(self._build_shortcut()), "Shortcut")
+        self.tabs.addTab(_scrollable(self._build_audio_output()), "Audio & output")
+        self.tabs.addTab(_scrollable(self._build_updates()), "Updates")
+
+        self.save_button = QPushButton("Save")
+        self.save_button.setDefault(True)
+        self.save_button.clicked.connect(self._on_save)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.hide)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.tabs, 1)
+        layout.addLayout(button_row(self.close_button, self.save_button))
+
+        self.load(settings)
+
+    # ==================================================================================
+    # Providers
+    # ==================================================================================
+
+    def _build_providers(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(
+            hint(
+                "Keys are shared between a source checkout and the installed app, so you only "
+                "enter them once. " + secrets.describe_store()
+            )
+        )
+
+        for spec in SPECS.values():
+            box = QGroupBox(spec.label)
+            form = QFormLayout(box)
+
+            field = QLineEdit()
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setPlaceholderText("Paste your API key")
+            self._key_fields[spec.id] = field
+
+            save = QPushButton("Save key")
+            save.clicked.connect(lambda _=False, pid=spec.id: self._save_key(pid))
+            clear = QPushButton("Clear")
+            clear.clicked.connect(lambda _=False, pid=spec.id: self._clear_key(pid))
+            test = QPushButton("Test")
+            test.setToolTip("Ask the provider for its model list using this key.")
+            test.clicked.connect(
+                lambda _=False, pid=spec.id: self.test_provider_requested.emit(pid)
+            )
+
+            row = QHBoxLayout()
+            row.addWidget(field, 1)
+            row.addWidget(save)
+            row.addWidget(test)
+            row.addWidget(clear)
+            holder = QWidget()
+            holder.setLayout(row)
+
+            status = QLabel("")
+            status.setWordWrap(True)
+            status.setStyleSheet("font-size: 11px; color: palette(mid);")
+            self._key_status[spec.id] = status
+
+            form.addRow(holder)
+            form.addRow(status)
+            capability = []
+            if spec.transcribes:
+                capability.append("transcription")
+            if spec.transforms:
+                capability.append("cleanup")
+            form.addRow(hint(f"{spec.notes} Used for: {', '.join(capability)}."))
+            if spec.env_var:
+                form.addRow(
+                    hint(f"{spec.env_var} in the environment overrides whatever is stored here.")
+                )
+            layout.addWidget(box)
+
+        planned = QGroupBox("Not yet available")
+        planned_layout = QVBoxLayout(planned)
+        planned_layout.addWidget(
+            hint(
+                "yada's provider layer is designed for these; each is one file plus a registry "
+                "entry, with no changes to the recording pipeline:\n"
+                + "\n".join(f"    • {name} — {what}" for name, what in PLANNED.items())
+            )
+        )
+        layout.addWidget(planned)
+        layout.addStretch(1)
+        return page
+
+    def _save_key(self, provider_id: str) -> None:
+        field = self._key_fields[provider_id]
+        store = secrets.set_key(provider_id, field.text())
+        field.clear()
+        self._key_status[provider_id].setText(
+            "Key cleared." if store is secrets.Store.NONE else f"Saved to the {store}."
+        )
+        self.key_changed.emit(provider_id)
+
+    def _clear_key(self, provider_id: str) -> None:
+        secrets.delete_key(provider_id)
+        self._key_fields[provider_id].clear()
+        self._key_status[provider_id].setText("Key cleared.")
+        self.key_changed.emit(provider_id)
+
+    def refresh_key_status(self) -> None:
+        for pid, spec in SPECS.items():
+            key, store = secrets.resolve_key(pid, spec.env_var)
+            label = self._key_status[pid]
+            if key:
+                label.setText(f"A key is set (from the {store}). Last 4: …{key[-4:]}")
+            else:
+                label.setText("No key set.")
+
+    def set_provider_test_result(self, provider_id: str, message: str) -> None:
+        if label := self._key_status.get(provider_id):
+            label.setText(message)
+
+    # ==================================================================================
+    # Transcription
+    # ==================================================================================
+
+    def _build_transcription(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        self.stt_provider = QComboBox()
+        for spec in SPECS.values():
+            if spec.transcribes:
+                self.stt_provider.addItem(spec.label, spec.id)
+        self.stt_provider.currentIndexChanged.connect(self._on_stt_provider_changed)
+        layout.addWidget(labelled("Provider", self.stt_provider))
+
+        self.stt_model = ModelPicker()
+        self.stt_model.refresh_requested.connect(
+            lambda: self.refresh_models_requested.emit("transcription")
+        )
+        layout.addWidget(
+            labelled(
+                "Model",
+                self.stt_model,
+                tip=(
+                    "Automatic follows the provider's newest recommended model, so yada does "
+                    "not go stale when they release something better."
+                ),
+            )
+        )
+
+        self.stt_streaming = QCheckBox("Transcribe while I speak, when the provider supports it")
+        layout.addWidget(self.stt_streaming)
+        layout.addWidget(
+            hint(
+                "With streaming, the text is ready the instant you stop talking. Providers "
+                "without a live connection (OpenRouter) transcribe after you stop instead — "
+                "the recording is always kept locally either way, so nothing is lost if the "
+                "connection drops mid-sentence."
+            )
+        )
+
+        self.stt_delay = QComboBox()
+        for value, label in [
+            ("minimal", "Minimal — fastest, slightly less accurate"),
+            ("low", "Low"),
+            ("medium", "Medium — balanced"),
+            ("high", "High"),
+            ("xhigh", "Maximum — most accurate, slowest"),
+        ]:
+            self.stt_delay.addItem(label, value)
+        layout.addWidget(
+            labelled(
+                "Speed vs accuracy",
+                self.stt_delay,
+                tip=(
+                    "Only used by providers that expose this dial. Actual timings vary by "
+                    "model, so it is worth trying a couple with your own voice."
+                ),
+            )
+        )
+        layout.addStretch(1)
+        return page
+
+    def _on_stt_provider_changed(self) -> None:
+        self.refresh_models_requested.emit("transcription")
+
+    # ==================================================================================
+    # Cleanup (transform)
+    # ==================================================================================
+
+    def _build_transform(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        self.tf_enabled = QCheckBox("Run an AI cleanup pass after transcription")
+        self.tf_enabled.toggled.connect(self._on_transform_toggled)
+        layout.addWidget(self.tf_enabled)
+        layout.addWidget(
+            hint("A second chime sounds when the cleanup finishes, so the two stages are "
+                 "distinguishable without looking.")
+        )
+
+        self.tf_body = QWidget()
+        body = QVBoxLayout(self.tf_body)
+        body.setContentsMargins(0, 6, 0, 0)
+
+        self.tf_provider = QComboBox()
+        for spec in SPECS.values():
+            if spec.transforms:
+                self.tf_provider.addItem(spec.label, spec.id)
+        self.tf_provider.currentIndexChanged.connect(
+            lambda: self.refresh_models_requested.emit("transform")
+        )
+
+        self.tf_model = ModelPicker(allow_auto=False)
+        self.tf_model.refresh_requested.connect(
+            lambda: self.refresh_models_requested.emit("transform")
+        )
+        self.tf_model.changed.connect(lambda _: self.refresh_models_requested.emit("capabilities"))
+
+        row = QHBoxLayout()
+        row.addWidget(labelled("Provider", self.tf_provider), 1)
+        row.addWidget(labelled("Model", self.tf_model), 2)
+        holder = QWidget()
+        holder.setLayout(row)
+        body.addWidget(holder)
+
+        self.tf_priority = SupportCheckBox("priority")
+        body.addWidget(self.tf_priority)
+
+        self.tf_reasoning_box = SupportCheckBox("reasoning")
+        self.tf_reasoning_box.toggled.connect(self._on_reasoning_toggled)
+        self.tf_reasoning = QComboBox()
+        reasoning_row = QHBoxLayout()
+        reasoning_row.addWidget(self.tf_reasoning_box)
+        reasoning_row.addWidget(self.tf_reasoning, 1)
+        reasoning_holder = QWidget()
+        reasoning_holder.setLayout(reasoning_row)
+        body.addWidget(reasoning_holder)
+
+        self.steps = StepsEditor()
+        body.addWidget(labelled("Cleanup steps", self.steps), 1)
+
+        reset = QPushButton("Reset to a single default cleanup step")
+        reset.clicked.connect(lambda: self.steps.set_steps(default_steps()))
+        body.addLayout(button_row(reset))
+
+        layout.addWidget(self.tf_body, 1)
+        return page
+
+    def _on_transform_toggled(self, on: bool) -> None:
+        self.tf_body.setEnabled(on)
+        if on and not self.steps.steps():
+            self.steps.set_steps(default_steps())
+
+    def _on_reasoning_toggled(self, on: bool) -> None:
+        self.tf_reasoning.setEnabled(on and self.tf_reasoning_box.isEnabled())
+
+    def set_transform_capabilities(
+        self, *, reasoning: Support, efforts: tuple[ReasoningEffort, ...], priority: Support
+    ) -> None:
+        """Called after capability discovery, which may be a live probe."""
+        self.tf_priority.set_support(priority)
+        self.tf_reasoning_box.set_support(reasoning)
+        current = self.tf_reasoning.currentData()
+        self.tf_reasoning.clear()
+        for effort in efforts or ():
+            self.tf_reasoning.addItem(str(effort), str(effort))
+        if current:
+            index = self.tf_reasoning.findData(current)
+            if index >= 0:
+                self.tf_reasoning.setCurrentIndex(index)
+        self._on_reasoning_toggled(self.tf_reasoning_box.isChecked())
+
+    # ==================================================================================
+    # Vocabulary
+    # ==================================================================================
+
+    def _build_vocabulary(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(
+            hint(
+                "Names, jargon and acronyms that get misheard. These are sent to the "
+                "transcription model as literal vocabulary hints where the provider supports "
+                "it, which fixes the spelling while it is still listening — far more effective "
+                "than correcting it afterwards. They are also added to the cleanup prompt as a "
+                "second line of defence."
+            )
+        )
+        self.vocab_terms = StringListEditor(placeholder="e.g. Troutwood")
+        layout.addWidget(labelled("Terms and their correct spellings", self.vocab_terms), 1)
+
+        self.vocab_context = PromptEditor(
+            "e.g. Software engineering notes and code review comments."
+        )
+        layout.addWidget(
+            labelled(
+                "What you usually dictate",
+                self.vocab_context,
+                tip=(
+                    "Free-form context, separate from the term list. Helps the model resolve "
+                    "ambiguous words in your domain."
+                ),
+            )
+        )
+
+        self.vocab_languages = QLineEdit()
+        self.vocab_languages.setPlaceholderText("en")
+        layout.addWidget(
+            labelled(
+                "Expected languages",
+                self.vocab_languages,
+                tip="Comma-separated codes. Only needed if you mix languages in one recording.",
+            )
+        )
+        layout.addWidget(
+            hint(
+                "Tip: for a spelling a model keeps getting wrong anyway, add a Find and replace "
+                "step on the Cleanup tab. It runs locally, costs nothing and cannot be ignored."
+            )
+        )
+        return page
+
+    # ==================================================================================
+    # Shortcut
+    # ==================================================================================
+
+    def _build_shortcut(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        self.hotkey_field = QLineEdit()
+        self.hotkey_field.setPlaceholderText("ctrl+shift+;")
+        layout.addWidget(
+            labelled(
+                "Shortcut",
+                self.hotkey_field,
+                tip="Needs at least one modifier, or it would fire while you type.",
+            )
+        )
+
+        self.hotkey_backend = QComboBox()
+        for value, label in [
+            ("auto", "Automatic (recommended)"),
+            ("win32", "Windows global hotkey"),
+            ("kde_portal", "Ask the desktop (Wayland portal)"),
+            ("external", "The desktop runs a command"),
+        ]:
+            self.hotkey_backend.addItem(label, value)
+        layout.addWidget(labelled("How to register it", self.hotkey_backend))
+
+        self.hotkey_status = QLabel("")
+        self.hotkey_status.setWordWrap(True)
+        self.hotkey_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(labelled("Status", self.hotkey_status))
+
+        self.copy_command = QPushButton("Copy the command to bind")
+        self.copy_command.clicked.connect(self._copy_toggle_command)
+        layout.addLayout(button_row(self.copy_command))
+        layout.addWidget(
+            hint(
+                "On Wayland, applications are not allowed to grab keys. yada asks the desktop "
+                "to own the shortcut; if that is unavailable, bind the command above in System "
+                "Settings → Shortcuts and it will reach yada just as fast."
+            )
+        )
+        layout.addStretch(1)
+        return page
+
+    def _copy_toggle_command(self) -> None:
+        from ..output import copy
+
+        ok, error = copy(toggle_command())
+        self.hotkey_status.setText(
+            f"Copied: {toggle_command()}" if ok else f"Could not copy: {error}"
+        )
+
+    def set_hotkey_status(self, text: str) -> None:
+        self.hotkey_status.setText(text)
+
+    # ==================================================================================
+    # Audio and output
+    # ==================================================================================
+
+    def _build_audio_output(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        self.audio_device = QComboBox()
+        self._reload_devices()
+        rescan = QPushButton("Rescan")
+        rescan.clicked.connect(self._reload_devices)
+        device_row = QHBoxLayout()
+        device_row.addWidget(self.audio_device, 1)
+        device_row.addWidget(rescan)
+        device_holder = QWidget()
+        device_holder.setLayout(device_row)
+        layout.addWidget(
+            labelled(
+                "Microphone",
+                device_holder,
+                tip=(
+                    "Stored by name, not by position, so unplugging a headset will not silently "
+                    "switch you to the wrong microphone."
+                ),
+            )
+        )
+
+        self.audio_gain = QDoubleSpinBox()
+        self.audio_gain.setRange(0.1, 4.0)
+        self.audio_gain.setSingleStep(0.1)
+        self.audio_gain.setDecimals(1)
+        layout.addWidget(
+            labelled(
+                "Input gain",
+                self.audio_gain,
+                tip=(
+                    "Only raise this if your microphone is genuinely quiet; clipping hurts "
+                    "accuracy."
+                ),
+            )
+        )
+
+        paste_box = QGroupBox("Pasting")
+        paste_layout = QVBoxLayout(paste_box)
+        self.paste_mode = QComboBox()
+        for value, label in PASTE_MODES:
+            self.paste_mode.addItem(label, value)
+        paste_layout.addWidget(self.paste_mode)
+        self.always_copy = QCheckBox("Always copy the result to the clipboard")
+        paste_layout.addWidget(self.always_copy)
+        backend = create_paste_backend()
+        paste_layout.addWidget(hint(backend.describe()))
+        layout.addWidget(paste_box)
+
+        chime_box = QGroupBox("Chimes")
+        chime_layout = QVBoxLayout(chime_box)
+        self.chime_transcription = QCheckBox("Chime when the transcript is ready")
+        self.chime_transformation = QCheckBox("Chime when the AI cleanup finishes")
+        chime_layout.addWidget(self.chime_transcription)
+        chime_layout.addWidget(self.chime_transformation)
+        chime_layout.addWidget(
+            hint("The two sounds differ in shape, not just pitch, so you can tell them apart "
+                 "without looking.")
+        )
+        layout.addWidget(chime_box)
+        layout.addStretch(1)
+        return page
+
+    def _reload_devices(self) -> None:
+        current = self.audio_device.currentData()
+        self.audio_device.clear()
+        self.audio_device.addItem("System default", None)
+        for dev in list_input_devices():
+            suffix = "  (default)" if dev.is_default else ""
+            self.audio_device.addItem(f"{dev.name}{suffix}", dev.name)
+        if current:
+            index = self.audio_device.findData(current)
+            if index < 0:
+                # Keep a configured-but-absent device visible rather than silently
+                # reassigning the user's choice.
+                self.audio_device.addItem(f"{current}  (not connected)", current)
+                index = self.audio_device.count() - 1
+            self.audio_device.setCurrentIndex(index)
+
+    # ==================================================================================
+    # Updates
+    # ==================================================================================
+
+    def _build_updates(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.update_enabled = QCheckBox("Keep yada up to date automatically")
+        layout.addWidget(self.update_enabled)
+        layout.addWidget(
+            hint(
+                "New versions download and unpack quietly in the background while you work. "
+                "The next time yada starts it is already the new version — there is no "
+                "installer to sit through. Each release is checked against a signature before "
+                "it is ever run, and the previous version is kept so a bad release can be "
+                "rolled back."
+            )
+        )
+        self.update_status = QLabel("No update check yet.")
+        self.update_status.setWordWrap(True)
+        layout.addWidget(labelled("Status", self.update_status))
+        check = QPushButton("Check now")
+        check.clicked.connect(self.check_updates_requested.emit)
+        layout.addLayout(button_row(check))
+        layout.addStretch(1)
+        return page
+
+    def set_update_status(self, text: str) -> None:
+        self.update_status.setText(text)
+
+    # ==================================================================================
+    # Load / collect
+    # ==================================================================================
+
+    def load(self, settings: Settings) -> None:
+        self._settings = dataclasses.replace(settings)
+        s = self._settings
+
+        self._select(self.stt_provider, s.transcription.provider)
+        self.stt_streaming.setChecked(s.transcription.prefer_streaming)
+        self._select(self.stt_delay, s.transcription.delay)
+
+        self.tf_enabled.setChecked(s.transform.enabled)
+        self.tf_body.setEnabled(s.transform.enabled)
+        self._select(self.tf_provider, s.transform.provider)
+        self.tf_priority.setChecked(s.transform.service_tier != str(ServiceTier.STANDARD))
+        self.tf_reasoning_box.setChecked(s.transform.reasoning_effort != str(ReasoningEffort.NONE))
+        self.steps.set_steps(s.transform.steps or [])
+
+        self.vocab_terms.set_values(s.vocabulary.terms)
+        self.vocab_context.setPlainText(s.vocabulary.context_prompt)
+        self.vocab_languages.setText(", ".join(s.vocabulary.languages))
+
+        self.hotkey_field.setText(s.hotkey.combo)
+        self._select(self.hotkey_backend, s.hotkey.backend)
+
+        self._reload_devices()
+        self._select(self.audio_device, s.audio.device)
+        self.audio_gain.setValue(s.audio.input_gain)
+
+        self._select(self.paste_mode, s.output.paste_mode)
+        self.always_copy.setChecked(s.output.always_copy_to_clipboard)
+        self.chime_transcription.setChecked(s.output.chime_on_transcription)
+        self.chime_transformation.setChecked(s.output.chime_on_transformation)
+
+        self.refresh_key_status()
+
+    def collect(self) -> Settings:
+        s = dataclasses.replace(self._settings)
+        s.transcription = dataclasses.replace(s.transcription)
+        s.transform = dataclasses.replace(s.transform)
+        s.vocabulary = dataclasses.replace(s.vocabulary)
+        s.hotkey = dataclasses.replace(s.hotkey)
+        s.audio = dataclasses.replace(s.audio)
+        s.output = dataclasses.replace(s.output)
+
+        s.transcription.provider = self.stt_provider.currentData() or "openai"
+        s.transcription.model = self.stt_model.current_model()
+        s.transcription.prefer_streaming = self.stt_streaming.isChecked()
+        s.transcription.delay = self.stt_delay.currentData() or "minimal"
+
+        s.transform.enabled = self.tf_enabled.isChecked()
+        s.transform.provider = self.tf_provider.currentData() or "openai"
+        s.transform.model = self.tf_model.current_model()
+        s.transform.service_tier = str(
+            ServiceTier.FAST if self.tf_priority.isChecked() else ServiceTier.STANDARD
+        )
+        s.transform.reasoning_effort = (
+            str(self.tf_reasoning.currentData() or ReasoningEffort.LOW)
+            if self.tf_reasoning_box.isChecked()
+            else str(ReasoningEffort.NONE)
+        )
+        s.transform.steps = self.steps.steps()
+
+        s.vocabulary.terms = self.vocab_terms.values()
+        s.vocabulary.context_prompt = self.vocab_context.toPlainText().strip()
+        s.vocabulary.languages = [
+            code.strip() for code in self.vocab_languages.text().split(",") if code.strip()
+        ] or ["en"]
+
+        s.hotkey.combo = self.hotkey_field.text().strip() or "ctrl+shift+;"
+        s.hotkey.backend = self.hotkey_backend.currentData() or "auto"
+
+        s.audio.device = self.audio_device.currentData()
+        s.audio.input_gain = float(self.audio_gain.value())
+
+        s.output.paste_mode = self.paste_mode.currentData() or "off"
+        s.output.always_copy_to_clipboard = self.always_copy.isChecked()
+        s.output.chime_on_transcription = self.chime_transcription.isChecked()
+        s.output.chime_on_transformation = self.chime_transformation.isChecked()
+        return s
+
+    @staticmethod
+    def _select(combo: QComboBox, value) -> None:
+        index = combo.findData(value)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _on_save(self) -> None:
+        self.saved.emit(self.collect())
+
+    # -- window behaviour ----------------------------------------------------------------
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # Qt naming convention
+        """Hide, never quit.
+
+        The absence of exactly this is why Whispering exits when you close its window on
+        Windows instead of staying in the tray.
+        """
+        event.ignore()
+        self.hide()
+
+
+DEFAULT_PROMPT_HINT = DEFAULT_SYSTEM_PROMPT

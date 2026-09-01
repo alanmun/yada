@@ -34,6 +34,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/yada"]
 
+[tool.uv]
+# PyInstaller needs libpython as a shared library to build a bootloader. Distro system
+# interpreters frequently omit it (Debian/Ubuntu split it into a separate package), so pin
+# to a uv-managed interpreter, which always includes it. Keeps local builds and CI identical.
+python-preference = "only-managed"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
