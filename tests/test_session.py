@@ -8,6 +8,7 @@ a network failure.
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 
@@ -33,7 +34,7 @@ PCM = b"\x01\x02" * 2400  # 0.2s at 24kHz
 class FakeCapture:
     """Stands in for PortAudio: feeds fixed frames into the tee on start()."""
 
-    instances: list[FakeCapture] = []
+    instances: ClassVar[list[FakeCapture]] = []
 
     def __init__(self, on_frames, *, device=None, gain=1.0, blocksize=1024):
         self.on_frames = on_frames

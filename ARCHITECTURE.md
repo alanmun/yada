@@ -200,6 +200,34 @@ launcher trusts, so an interrupted extraction is ignored rather than booted. A v
 starts three times without reporting healthy stops being chosen, and the previous release
 is still on disk — a crash-on-launch release is an inconvenience, not a bricked app.
 
+## Packaging, and three traps in it
+
+Built with PyInstaller in **one-dir** mode. One-file re-extracts the whole bundle to a temp
+directory on every launch, which adds seconds to startup — unacceptable for a tray app
+expected to answer a keypress. One-dir also lets the updater swap a directory atomically,
+which is exactly the shape the versioned layout wants.
+
+Three things here were found by building and running, not by reading, and each would have
+shipped a broken binary:
+
+1. **PyInstaller runs its entry script as `__main__` with no package context.** A module using
+   relative imports therefore cannot be the entry point — `from . import ipc` fails with
+   "attempted relative import with no known parent package". Hence the tiny shims in
+   `packaging/entry_app.py` and `packaging/entry_launcher.py`, which import by absolute path.
+2. **The launcher must not import the updater package eagerly.** `yada/updater/__init__.py`
+   used to import `github`, which imports httpx — deliberately excluded from the launcher
+   bundle. The launcher crashed on startup. The package now imports `core` (pure standard
+   library) eagerly and everything else lazily via PEP 562 `__getattr__`.
+3. **PortAudio is not bundled by the Linux `sounddevice` wheel.** `sounddevice` is a single
+   module that `dlopen()`s PortAudio at import, so PyInstaller cannot see the dependency by
+   static analysis. The spec locates and bundles `libportaudio` explicitly, and *fails the
+   build* if it cannot — a binary that starts and then silently cannot record is a far worse
+   failure than one that does not build.
+
+Also: builds are pinned to a uv-managed interpreter (`python-preference = "only-managed"`).
+Distro system pythons frequently ship without `libpython3.x.so`, which PyInstaller requires
+to build a bootloader, and the resulting error names a package rather than the real cause.
+
 ## Layout
 
 ```
