@@ -1,0 +1,47 @@
+[project]
+name = "yada"
+version = "0.1.0"
+description = "Tray-resident push-to-talk dictation: hotkey, transcribe, transform, paste."
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",
+    "sounddevice>=0.4.6",
+    "soxr>=0.5",
+    "numpy>=1.26",
+    "httpx>=0.27",
+    "websockets>=13.0",
+    "keyring>=25.0",
+    "platformdirs>=4.0",
+    # Ed25519 verification of release signatures. Non-optional: the updater executes
+    # code it downloaded, so signature checking must not be skippable at install time.
+    "cryptography>=42.0",
+    # Wayland global-shortcut and RemoteDesktop portals speak D-Bus.
+    "dbus-fast>=2.21; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6", "pyinstaller>=6.0"]
+
+[project.scripts]
+# Also the shim KDE binds Ctrl+Shift+; to: `yada toggle` pokes the running instance over IPC.
+# The stable shim that release directories sit behind.
+yada = "yada.launcher:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yada"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "BLE", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+testpaths = ["tests"]
