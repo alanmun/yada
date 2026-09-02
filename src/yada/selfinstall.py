@@ -56,14 +56,26 @@ def payload_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def executable_dir() -> Path:
+    """Where this process's executable actually lives.
+
+    Deliberately ignores YADA_PAYLOAD_DIR. That override says where files to *install*
+    come from, which is a different question from where we are running, and conflating the
+    two produced an infinite install loop: the freshly installed copy inherited the
+    variable, concluded it was a payload, and installed itself again.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def is_managed_install() -> bool:
     """True when running from `<install root>/versions/<v>/`.
 
     That is the shape the updater maintains. Anything else -- an extracted archive in
     Downloads, say -- means yada has not been installed yet.
     """
-    here = payload_dir()
-    return here.parent.name == "versions"
+    return executable_dir().parent.name == "versions"
 
 
 def payload_version() -> str:
@@ -176,17 +188,33 @@ def install(*, version: str | None = None) -> Path:
     return target / exe
 
 
+# Variables that describe *this* payload and must not reach the installed copy.
+_PAYLOAD_ONLY_ENV = ("YADA_PAYLOAD_DIR", "YADA_VERSION")
+
+
 def relaunch(executable: Path, args: list[str] | None = None) -> bool:
-    """Start the installed copy, detached, and report whether it launched."""
+    """Start the installed copy, detached, and report whether it launched.
+
+    The child gets a cleaned environment. Passing ours through meant the installed copy
+    inherited YADA_PAYLOAD_DIR, decided it was an uninstalled payload, and installed
+    itself again -- an install loop that never started the app.
+    """
     command = [str(executable), *(args or [])]
+    child_env = {k: v for k, v in os.environ.items() if k not in _PAYLOAD_ONLY_ENV}
     try:
         if sys.platform == "win32":
             # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-            subprocess.Popen(command, close_fds=True, creationflags=0x00000008 | 0x00000200)
+            subprocess.Popen(
+                command,
+                close_fds=True,
+                env=child_env,
+                creationflags=0x00000008 | 0x00000200,
+            )
         else:
             subprocess.Popen(
                 command,
                 close_fds=True,
+                env=child_env,
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

@@ -122,3 +122,43 @@ def test_claim_healthy_marks_the_running_version(install, monkeypatch):
     _pretend_running_from(current, monkeypatch)
     relaunch.claim_healthy()
     assert core._load_state()["versions"]["0.3.0"]["healthy"] is True
+
+
+def test_payload_env_does_not_reach_the_installed_copy(install, monkeypatch, tmp_path):
+    """The installed copy must not think it is a payload.
+
+    It inherited YADA_PAYLOAD_DIR from the installer, concluded it was an uninstalled
+    payload, and installed itself again -- an install loop that never started the app.
+    """
+    from yada import selfinstall
+
+    monkeypatch.setenv("YADA_PAYLOAD_DIR", str(tmp_path / "payload"))
+    monkeypatch.setenv("YADA_VERSION", "9.9.9")
+
+    captured: dict = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(selfinstall.subprocess, "Popen", fake_popen)
+    target = _install_version("0.2.0")
+    assert selfinstall.relaunch(target / core.executable_name()) is True
+
+    env = captured["env"]
+    assert "YADA_PAYLOAD_DIR" not in env
+    assert "YADA_VERSION" not in env
+
+
+def test_managed_install_ignores_the_payload_override(install, monkeypatch, tmp_path):
+    """Where we are running is a different question from where files come from."""
+    from yada import selfinstall
+
+    version_dir = _install_version("0.2.0")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(version_dir / core.executable_name()))
+    monkeypatch.setenv("YADA_PAYLOAD_DIR", str(tmp_path / "somewhere-else"))
+
+    assert selfinstall.is_managed_install() is True, (
+        "the override must not make an installed copy look uninstalled"
+    )

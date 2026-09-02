@@ -15,8 +15,14 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import ClassVar
 
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QPalette, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFontMetrics,
+    QPalette,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -386,18 +392,32 @@ class CheckableComboBox(QComboBox):
 
     def set_options(self, options: list[tuple[str, str]], *, checked: list[str]) -> None:
         """`options` is [(value, label)]; `checked` the values to tick."""
+        # An explicit row height, rather than relying on the stylesheet. 0.1.7 styled
+        # QComboBox without styling its popup view, and the dropdown opened with no
+        # visible rows at all -- it read as "no options". Setting the hint from the font
+        # makes the height independent of how any platform style interprets the QSS.
+        row_height = QFontMetrics(self.font()).height() + 12
+
         self._model.blockSignals(True)
         self._model.clear()
         wanted = set(checked)
         for value, label in options:
             item = QStandardItem(label)
             item.setData(value, Qt.ItemDataRole.UserRole)
-            item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setFlags(
+                Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            item.setSizeHint(QSize(0, row_height))
             item.setCheckState(
                 Qt.CheckState.Checked if value in wanted else Qt.CheckState.Unchecked
             )
             self._model.appendRow(item)
         self._model.blockSignals(False)
+        # Show a decent number of rows before scrolling, rather than Qt's default of ten
+        # at a tiny height.
+        self.setMaxVisibleItems(12)
         self._refresh_text()
 
     def checked_values(self) -> list[str]:

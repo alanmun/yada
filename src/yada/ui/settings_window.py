@@ -119,7 +119,7 @@ class SettingsWindow(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(_scrollable(self._build_providers()), "Providers")
         self.tabs.addTab(_scrollable(self._build_transcription()), "Transcribe")
-        self.tabs.addTab(self._build_transform(), "Transform")
+        self.tabs.addTab(_scrollable(self._build_transform()), "Transform")
         self.tabs.addTab(_scrollable(self._build_vocabulary()), "Vocabulary")
         self.tabs.addTab(_scrollable(self._build_shortcut()), "Shortcut")
         self.tabs.addTab(_scrollable(self._build_audio_output()), "Audio && output")
@@ -143,14 +143,10 @@ class SettingsWindow(QWidget):
         self.restart_button.clicked.connect(self.restart_requested.emit)
         self.restart_button.setVisible(False)
 
-        self.close_button = QPushButton("Close")
-        self.close_button.clicked.connect(self.hide)
-
         bottom = QHBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)
         bottom.addWidget(self._saved_note, 1)
         bottom.addWidget(self.restart_button)
-        bottom.addWidget(self.close_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.tabs, 1)
@@ -170,15 +166,24 @@ class SettingsWindow(QWidget):
         which beats a window larger than the desktop.
         """
         needed = self.tabs.tabBar().sizeHint().width() + 48
-        self.setMinimumWidth(min(needed, 1400))
+        # Wide enough by default to show every tab, but not *required* to be: forcing a
+        # minimum as wide as the tab bar is the same complaint as forcing a minimum as tall
+        # as the monitor. Qt scrolls the tab bar when it does not fit.
+        self.setMinimumWidth(460)
+
+        # Height is deliberately unconstrained beyond something usable. Every tab lives in
+        # a scroll area, so a short window scrolls rather than clipping -- and a window
+        # that could not be made shorter than the monitor was unusable next to anything
+        # else. Qt would otherwise take the tallest tab's full content as the minimum.
+        self.setMinimumHeight(220)
 
         scale = max(1.0, min(2.0, float(getattr(settings, "text_scale", 1.0))))
-        width, height = needed + 40, int(600 * (0.55 + 0.45 * scale))
+        width, height = needed + 40, int(560 * (0.55 + 0.45 * scale))
         if screen := QApplication.primaryScreen():
             available = screen.availableGeometry()
             width = min(width, int(available.width() * 0.92))
-            height = min(height, int(available.height() * 0.92))
-        self.resize(max(width, self.minimumWidth()), height)
+            height = min(height, int(available.height() * 0.85))
+        self.resize(max(width, self.minimumWidth()), max(height, self.minimumHeight()))
 
     # ==================================================================================
     # Providers

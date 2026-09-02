@@ -21,13 +21,14 @@ THEMES = ("blue", "system")
 # Qt's default is 9pt on Windows and varies elsewhere, so a fixed number would be wrong
 # somewhere; a multiplier scales every label, button and field together, which is what
 # "evenly throughout" needs.
-TEXT_SCALES = (1.0, 1.25, 1.5, 1.75, 2.0)
+TEXT_SCALES = (1.0, 1.2, 1.4, 1.6, 1.8, 2.0)
 
 TEXT_SCALE_LABELS = {
     1.0: "Normal (system default)",
-    1.25: "Larger",
-    1.5: "Large",
-    1.75: "Very large",
+    1.2: "Slightly larger",
+    1.4: "Larger",
+    1.6: "Large (recommended)",
+    1.8: "Very large",
     2.0: "Largest (double the system default)",
 }
 
@@ -112,7 +113,17 @@ def blue_palette() -> QPalette:
 # A few things a palette genuinely cannot express: group-box titles, the accent underline
 # on the selected tab, and focus rings. Kept deliberately short -- every rule here is a
 # widget Qt is no longer drawing natively.
-BLUE_STYLESHEET = f"""
+def blue_stylesheet(point_size: float = 9.0) -> str:
+    """Styling that has to scale with the font.
+
+    Two things went wrong by leaving sub-controls unstyled. A QCheckBox indicator keeps its
+    default size while the tick glyph grows with the font, so the tick crops out of the box.
+    And styling QComboBox without also styling its popup view collapses the rows to zero
+    height -- the language dropdown opened completely empty, which read as "no options".
+    """
+    indicator = max(14, round(point_size * 1.5))
+    row = max(20, round(point_size * 2.1))
+    return f"""
 QGroupBox {{
     border: 1px solid {BLUE["mid"]};
     border-radius: 6px;
@@ -164,6 +175,45 @@ QDoubleSpinBox:focus, QSpinBox:focus {{
     border-color: {BLUE["highlight"]};
 }}
 QSlider::sub-page:horizontal {{ background: {BLUE["highlight"]}; }}
+
+/* Sized from the font. Without this the tick is drawn larger than its box. */
+QCheckBox::indicator, QRadioButton::indicator {{
+    width: {indicator}px;
+    height: {indicator}px;
+}}
+QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {{
+    border: 1px solid {BLUE["mid"]};
+    border-radius: 3px;
+    background: {BLUE["base"]};
+}}
+QCheckBox::indicator:checked {{
+    border: 1px solid {BLUE["highlight"]};
+    border-radius: 3px;
+    background: {BLUE["highlight"]};
+    image: none;
+}}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+    border-color: {BLUE["highlight"]};
+}}
+
+/* The popup is a separate widget. Styling the combo without it left rows zero-high. */
+QComboBox QAbstractItemView {{
+    border: 1px solid {BLUE["mid"]};
+    background: {BLUE["base"]};
+    selection-background-color: {BLUE["highlight"]};
+    selection-color: {BLUE["bright_text"]};
+    outline: none;
+    padding: 2px;
+}}
+QComboBox QAbstractItemView::item {{
+    min-height: {row}px;
+    padding: 2px 6px;
+}}
+QComboBox QAbstractItemView::indicator {{
+    width: {indicator}px;
+    height: {indicator}px;
+}}
+QListWidget::item {{ min-height: {row}px; padding: 2px 4px; }}
 """
 
 
@@ -190,10 +240,10 @@ def apply_theme(app, theme: str, scale: float = 1.0) -> None:
 
     Unknown theme names fall back to the blue palette.
     """
-    apply_text_scale(app, scale)
+    point_size = apply_text_scale(app, scale)
     if theme == "system":
         app.setStyleSheet("")
         app.setPalette(app.style().standardPalette())
         return
     app.setPalette(blue_palette())
-    app.setStyleSheet(BLUE_STYLESHEET)
+    app.setStyleSheet(blue_stylesheet(point_size))
