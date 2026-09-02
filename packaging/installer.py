@@ -161,6 +161,37 @@ def add_linux_integration(root: Path) -> None:
     print(f"  desktop entry: {apps / (APP + '.desktop')}")
 
 
+def launch(root: Path) -> bool:
+    """Start yada, so installing a tray app does something visible.
+
+    Without this the installer finishes, nothing appears, and the only clue is a Start Menu
+    entry the user has no reason to look for. Detached on purpose: the installer must not
+    wait for the app it just started.
+    """
+    launcher = root / EXE
+    try:
+        if IS_WINDOWS:
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, so closing this console window
+            # does not take the app with it.
+            subprocess.Popen(
+                [str(launcher)],
+                close_fds=True,
+                creationflags=0x00000008 | 0x00000200,
+            )
+        else:
+            subprocess.Popen(
+                [str(launcher)],
+                close_fds=True,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  note: could not start yada automatically ({exc})")
+        return False
+    return True
+
+
 def main() -> int:
     here = payload_dir()
     print("yada installer")
@@ -186,16 +217,25 @@ def main() -> int:
         else:
             add_linux_integration(root)
 
+        print("\n  starting yada")
+        started = launch(root)
+
         print("\n" + "=" * 52)
-        print("Installed.")
+        print("Installed." if not started else "Installed and running.")
         if IS_WINDOWS:
-            print("Find yada in your Start Menu. It starts with Windows from now on.")
-            print("Your shortcut is Ctrl+Shift+; and registers automatically.")
+            print()
+            print("  LOOK FOR THE TRAY ICON BEHIND THE ^ ARROW on your taskbar.")
+            print("  Windows 11 hides new tray icons there by default. To keep it visible,")
+            print("  drag it out, or turn on Settings > Personalisation > Taskbar >")
+            print("  'Other system tray icons'.")
+            print()
+            print("  yada is also in your Start Menu and starts with Windows from now on.")
+            print("  Your shortcut is Ctrl+Shift+; and is registered automatically.")
         else:
-            print(f"Run it with: {root / EXE}")
-            print("On Wayland, bind Ctrl+Shift+; in System Settings to:")
-            print(f"    {root / EXE} toggle")
-        print("\nOpen Settings from the tray icon and paste an API key to begin.")
+            print(f"\n  Run it with: {root / EXE}")
+            print("  On Wayland, bind Ctrl+Shift+; in System Settings to:")
+            print(f"      {root / EXE} toggle")
+        print("\n  Open Settings from the tray icon and paste an API key to begin.")
         return 0
     except SystemExit as exc:
         print(f"\nInstall failed: {exc}")

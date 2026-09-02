@@ -15,7 +15,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -27,7 +26,7 @@ from PySide6.QtWidgets import (
 
 from ..config import TransformStep
 from ..pipeline.transform import DEFAULT_SYSTEM_PROMPT
-from .widgets import PromptEditor, hint, labelled
+from .widgets import PromptEditor, error_label, hint, labelled
 
 STEP_LABELS = {
     "prompt_transform": "AI cleanup",
@@ -117,9 +116,9 @@ class StepsEditor(QWidget):
         self.replace_field.textChanged.connect(self._collect)
         self.regex_box = QCheckBox("Treat the search text as a regular expression")
         self.regex_box.toggled.connect(self._collect)
-        self.regex_error = QLabel("")
-        self.regex_error.setStyleSheet("color: #c0392b; font-size: 11px;")
-        self.regex_error.setWordWrap(True)
+        # error_label picks a red that contrasts with the actual background; the previous
+        # fixed #c0392b was unreadable on a dark theme.
+        self.regex_error = error_label("")
 
         fr_pane = QWidget()
         fr_layout = QVBoxLayout(fr_pane)

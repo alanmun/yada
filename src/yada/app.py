@@ -153,7 +153,7 @@ class YadaApp(QObject):
     # ==================================================================================
 
     def start(self) -> None:
-        self.chimes.preload()
+        self._configure_chimes()
 
         # Materialise defaults on first run, so there is a file to read and hand-edit rather
         # than an absence the user has to guess at.
@@ -350,6 +350,7 @@ class YadaApp(QObject):
             window.key_changed.connect(lambda _pid: self.refresh_models("transcription"))
             window.test_provider_requested.connect(self._test_provider)
             window.check_updates_requested.connect(self.check_updates)
+            window.preview_sound_requested.connect(self._preview_sound)
             self.settings_window = window
         else:
             self.settings_window.load(self.settings)
@@ -430,6 +431,27 @@ class YadaApp(QObject):
     # ==================================================================================
     # Slots
     # ==================================================================================
+
+    def _configure_chimes(self) -> None:
+        """Point each stage at its selected sound and preload it.
+
+        Called at startup and after every save, so switching a chime takes effect without
+        a restart. A selection that no longer resolves falls back to the built-in.
+        """
+        out = self.settings.output
+        self.chimes.configure(
+            transcription=out.chime_transcription_sound,
+            transformation=out.chime_transformation_sound,
+            volume=out.chime_volume,
+        )
+
+    def _preview_sound(self, sound_id: str) -> None:
+        """Play a sound from the settings window, at the volume currently on the slider."""
+        window = self.settings_window
+        if window is not None:
+            self.chimes.set_volume(window.chime_volume.value())
+        if sound_id:
+            self.chimes.preview(sound_id)
 
     def _chime(self, stage: Stage) -> None:
         out = self.settings.output
@@ -535,7 +557,7 @@ class YadaApp(QObject):
                     self._hotkey.stop()
             self._start_hotkey()
 
-        self.chimes.set_volume(0.6)
+        self._configure_chimes()
         self.tray.set_shortcut_label(self._shortcut_label())
         if new_settings.transcription.provider != old.transcription.provider:
             self.refresh_models("transcription")

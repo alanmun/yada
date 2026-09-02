@@ -13,8 +13,10 @@ Three ideas recur across the tabs and are worth factoring out:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from typing import ClassVar
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -40,13 +42,97 @@ from ..providers.base import (
 )
 
 
+class HintLabel(QLabel):
+    """Explanatory text that stays readable in light *and* dark themes.
+
+    The first version of this styled itself `color: palette(mid); font-size: 11px`. On a
+    light Windows theme that reads fine. On dark it is low-contrast grey on grey and
+    genuinely hard to read, and 11px is roughly 8pt on Windows -- small on top of dim.
+
+    So the colour is computed from the live palette instead of named from it: blend the
+    window text colour toward the window background, which dims the text by a fixed
+    proportion while keeping real contrast whichever way round those two colours are. The
+    warning and error tones pick a light or dark variant based on background luminance for
+    the same reason. Recomputed on palette change, so switching the OS theme while the
+    window is open does not leave stale colours.
+    """
+
+    # Blend toward the background: clearly secondary, still comfortably legible.
+    MUTED_BLEND = 0.30
+
+    # (light-background variant, dark-background variant)
+    _WARNING: ClassVar[tuple[str, str]] = ("#8a5300", "#f0b357")
+    _ERROR: ClassVar[tuple[str, str]] = ("#b3261e", "#ff8a80")
+
+    def __init__(self, text: str = "", *, tone: str = "muted", parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self._tone = tone
+        # setStyleSheet emits a PaletteChange, which re-enters changeEvent. Without this
+        # guard the two call each other until the stack runs out.
+        self._restyling = False
+        self._applied: str | None = None
+        self.setWordWrap(True)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self._restyle()
+
+    def _restyle(self) -> None:
+        if self._restyling:
+            return
+        palette = self.palette()
+        background = palette.color(QPalette.ColorRole.Window)
+        if self._tone == "muted":
+            colour = self._blend(
+                palette.color(QPalette.ColorRole.WindowText), background, self.MUTED_BLEND
+            )
+        else:
+            light_variant, dark_variant = (
+                self._WARNING if self._tone == "warning" else self._ERROR
+            )
+            colour = QColor(dark_variant if _is_dark(background) else light_variant)
+        # Only the colour is set. The font size is left alone deliberately: dimmed text is
+        # already secondary, and shrinking it as well made it unreadable.
+        name = colour.name()
+        if name == self._applied:
+            return
+        self._restyling = True
+        try:
+            self._applied = name
+            self.setStyleSheet(f"color: {name};")
+        finally:
+            self._restyling = False
+
+    @staticmethod
+    def _blend(foreground: QColor, background: QColor, amount: float) -> QColor:
+        keep = 1.0 - amount
+        return QColor(
+            round(foreground.red() * keep + background.red() * amount),
+            round(foreground.green() * keep + background.green() * amount),
+            round(foreground.blue() * keep + background.blue() * amount),
+        )
+
+    def changeEvent(self, event) -> None:  # Qt naming convention
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ThemeChange):
+            self._restyle()
+        super().changeEvent(event)
+
+
+def _is_dark(colour: QColor) -> bool:
+    """Perceptual luminance, so 'dark' matches what the eye reports rather than raw RGB."""
+    r, g, b = colour.redF(), colour.greenF(), colour.blueF()
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 0.5
+
+
 def hint(text: str) -> QLabel:
-    """Small, wrapped, dimmed explanatory text."""
-    label = QLabel(text)
-    label.setWordWrap(True)
-    label.setStyleSheet("color: palette(mid); font-size: 11px;")
-    label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-    return label
+    """Wrapped, dimmed explanatory text that is legible in either theme."""
+    return HintLabel(text)
+
+
+def warning_label(text: str = "") -> QLabel:
+    return HintLabel(text, tone="warning")
+
+
+def error_label(text: str = "") -> QLabel:
+    return HintLabel(text, tone="error")
 
 
 class ModelPicker(QWidget):
@@ -70,8 +156,7 @@ class ModelPicker(QWidget):
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
 
         self.status = hint("Models not discovered yet.")
-        self.drift = hint("")
-        self.drift.setStyleSheet("color: #c07000; font-size: 11px;")
+        self.drift = warning_label("")
         self.drift.hide()
 
         row = QHBoxLayout()

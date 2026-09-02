@@ -36,10 +36,11 @@ from .. import secrets
 from ..audio import list_input_devices
 from ..config import Settings
 from ..hotkey import toggle_command
-from ..output import create_paste_backend
+from ..output import create_paste_backend, sounds
 from ..pipeline.transform import DEFAULT_SYSTEM_PROMPT, default_steps
 from ..providers.base import ReasoningEffort, ServiceTier, Support
 from ..providers.registry import PLANNED, SPECS
+from .sound_picker import ChimeRow, SoundLibraryEditor, VolumeRow
 from .steps_editor import StepsEditor
 from .widgets import (
     ModelPicker,
@@ -72,6 +73,8 @@ class SettingsWindow(QWidget):
     key_changed = Signal(str)  # provider id
     test_provider_requested = Signal(str)  # provider id
     check_updates_requested = Signal()
+    preview_sound_requested = Signal(str)
+    sound_library_changed = Signal()
 
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -87,7 +90,7 @@ class SettingsWindow(QWidget):
         self.tabs.addTab(self._build_transform(), "Cleanup")
         self.tabs.addTab(_scrollable(self._build_vocabulary()), "Vocabulary")
         self.tabs.addTab(_scrollable(self._build_shortcut()), "Shortcut")
-        self.tabs.addTab(_scrollable(self._build_audio_output()), "Audio & output")
+        self.tabs.addTab(_scrollable(self._build_audio_output()), "Audio && output")
         self.tabs.addTab(_scrollable(self._build_updates()), "Updates")
 
         self.save_button = QPushButton("Save")
@@ -143,9 +146,10 @@ class SettingsWindow(QWidget):
             holder = QWidget()
             holder.setLayout(row)
 
-            status = QLabel("")
-            status.setWordWrap(True)
-            status.setStyleSheet("font-size: 11px; color: palette(mid);")
+            # HintLabel rather than a hand-styled QLabel: the previous
+            # "color: palette(mid); font-size: 11px" was unreadable on a dark theme, which
+            # is what made "No key set." impossible to see.
+            status = hint("")
             self._key_status[spec.id] = status
 
             form.addRow(holder)
@@ -438,6 +442,7 @@ class SettingsWindow(QWidget):
         self.hotkey_status = QLabel("")
         self.hotkey_status.setWordWrap(True)
         self.hotkey_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # Status the user must be able to read and copy: left at full contrast.
         layout.addWidget(labelled("Status", self.hotkey_status))
 
         self.copy_command = QPushButton("Copy the command to bind")
@@ -521,17 +526,46 @@ class SettingsWindow(QWidget):
 
         chime_box = QGroupBox("Chimes")
         chime_layout = QVBoxLayout(chime_box)
-        self.chime_transcription = QCheckBox("Chime when the transcript is ready")
-        self.chime_transformation = QCheckBox("Chime when the AI cleanup finishes")
-        chime_layout.addWidget(self.chime_transcription)
-        chime_layout.addWidget(self.chime_transformation)
-        chime_layout.addWidget(
-            hint("The two sounds differ in shape, not just pitch, so you can tell them apart "
-                 "without looking.")
+
+        self.chime_transcription = ChimeRow("Chime when the transcript is ready")
+        self.chime_transformation = ChimeRow("Chime when the AI cleanup finishes")
+        for row in (self.chime_transcription, self.chime_transformation):
+            row.preview_requested.connect(self.preview_sound_requested.emit)
+            chime_layout.addWidget(row)
+
+        self.chime_volume = VolumeRow()
+        self.chime_volume.changed.connect(
+            lambda: self.preview_sound_requested.emit(self.chime_transcription.current_sound())
         )
+        chime_layout.addWidget(self.chime_volume)
+        chime_layout.addWidget(
+            hint(
+                "The two built-in sounds differ in shape, not just pitch — one rises, the "
+                "other falls and settles — so you can tell the stages apart without looking. "
+                "Worth keeping that distinction if you use your own."
+            )
+        )
+
+        self.sound_library = SoundLibraryEditor()
+        self.sound_library.preview_requested.connect(self.preview_sound_requested.emit)
+        self.sound_library.library_changed.connect(self._on_library_changed)
+        chime_layout.addWidget(labelled("Your own sounds", self.sound_library))
         layout.addWidget(chime_box)
         layout.addStretch(1)
         return page
+
+    def _on_library_changed(self) -> None:
+        """Keep both pickers in step with the library after an import or removal."""
+        self._reload_sound_pickers(
+            self.chime_transcription.current_sound(),
+            self.chime_transformation.current_sound(),
+        )
+        self.sound_library_changed.emit()
+
+    def _reload_sound_pickers(self, transcription: str, transformation: str) -> None:
+        library = sounds.library()
+        self.chime_transcription.set_library(library, current=transcription)
+        self.chime_transformation.set_library(library, current=transformation)
 
     def _reload_devices(self) -> None:
         current = self.audio_device.currentData()
@@ -611,8 +645,13 @@ class SettingsWindow(QWidget):
 
         self._select(self.paste_mode, s.output.paste_mode)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
-        self.chime_transcription.setChecked(s.output.chime_on_transcription)
-        self.chime_transformation.setChecked(s.output.chime_on_transformation)
+        self.chime_transcription.set_enabled_state(s.output.chime_on_transcription)
+        self.chime_transformation.set_enabled_state(s.output.chime_on_transformation)
+        self._reload_sound_pickers(
+            s.output.chime_transcription_sound, s.output.chime_transformation_sound
+        )
+        self.chime_volume.set_value(s.output.chime_volume)
+        self.sound_library.refresh()
 
         self.refresh_key_status()
 
@@ -657,8 +696,15 @@ class SettingsWindow(QWidget):
 
         s.output.paste_mode = self.paste_mode.currentData() or "off"
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
-        s.output.chime_on_transcription = self.chime_transcription.isChecked()
-        s.output.chime_on_transformation = self.chime_transformation.isChecked()
+        s.output.chime_on_transcription = self.chime_transcription.is_enabled()
+        s.output.chime_on_transformation = self.chime_transformation.is_enabled()
+        s.output.chime_transcription_sound = (
+            self.chime_transcription.current_sound() or s.output.chime_transcription_sound
+        )
+        s.output.chime_transformation_sound = (
+            self.chime_transformation.current_sound() or s.output.chime_transformation_sound
+        )
+        s.output.chime_volume = self.chime_volume.value()
         return s
 
     @staticmethod

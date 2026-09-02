@@ -10,7 +10,11 @@ Everything else in this folder is the application itself. You do not need to ope
 Windows may warn that the publisher is unrecognised, because these binaries are not
 code-signed. Choose "More info", then "Run anyway".
 
-After installing, open Settings from the tray icon and paste an API key.
+yada starts automatically once installed. LOOK FOR ITS ICON BEHIND THE ^ ARROW on
+your taskbar -- Windows 11 hides new tray icons there by default. Drag it out, or
+turn on Settings > Personalisation > Taskbar > "Other system tray icons".
+
+Then open Settings from the tray icon and paste an API key.
 
 If something looks wrong, run the built-in check:
     Windows:  %LOCALAPPDATA%\yada\yada.exe doctor

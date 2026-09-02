@@ -120,6 +120,12 @@ class OutputSettings:
     # Two distinct chimes; the transform one is noise when no transform is configured.
     chime_on_transcription: bool = True
     chime_on_transformation: bool = True
+    # Which sound each stage uses, as a library id rather than a path: built-in sounds live
+    # inside the versioned install directory, which is replaced on every update, so a
+    # stored path would break on the next release. See output/sounds.py.
+    chime_transcription_sound: str = "builtin:transcription"
+    chime_transformation_sound: str = "builtin:transformation"
+    chime_volume: float = 0.6
     always_copy_to_clipboard: bool = True
 
 
