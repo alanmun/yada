@@ -250,7 +250,7 @@ class SettingsWindow(QWidget):
             if spec.transcribes:
                 capability.append("transcription")
             if spec.transforms:
-                capability.append("cleanup")
+                capability.append("transform")
             form.addRow(hint(f"{spec.notes} Used for: {', '.join(capability)}."))
             if spec.env_var:
                 form.addRow(
