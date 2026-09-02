@@ -279,6 +279,56 @@ def _install_checks() -> list[Check]:
     return checks
 
 
+def _antivirus_checks() -> list[Check]:
+    """On Windows, look for antivirus action against yada's own files.
+
+    Worth a dedicated check because the symptom is otherwise baffling: yada installs
+    cleanly, then a minute later its shortcut and autostart entry are gone and nothing
+    starts. That happened for real -- Defender classified the old one-file launcher as
+    Trojan:Win32/Bearfoos.A!ml, a machine-learning heuristic that fires readily on
+    self-extracting executables, and removed the file, the Start Menu shortcut and the run
+    key together. yada no longer ships that binary, but if anything else gets quarantined
+    the user deserves to be told rather than left guessing.
+    """
+    if sys.platform != "win32":
+        return []
+    script = (
+        "$d = Get-MpThreatDetection -ErrorAction SilentlyContinue | "
+        "Where-Object { ($_.Resources -join ' ') -match 'yada' } | "
+        "Sort-Object InitialDetectionTime -Descending | Select-Object -First 1; "
+        "if ($d) { "
+        "  $t = Get-MpThreat -ErrorAction SilentlyContinue | "
+        "       Where-Object { $_.ThreatID -eq $d.ThreatID } | Select-Object -First 1; "
+        "  \"$($t.ThreatName)|$($d.InitialDetectionTime)\" }"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    line = (proc.stdout or "").strip()
+    if not line or "|" not in line:
+        return [Check("Antivirus", OK, "no antivirus action against yada's files")]
+    name, _, when = line.partition("|")
+    return [
+        Check(
+            "Antivirus",
+            WARN,
+            f"Windows Defender acted on a yada file: {name.strip()} ({when.strip()})",
+            "This is a false positive -- yada is unsigned, and heuristics flag small "
+            "unsigned programs that start with Windows. To keep it working, either allow "
+            "the item in Windows Security > Protection history, or exclude the folder:\n"
+            "    Add-MpPreference -ExclusionPath \"$env:LOCALAPPDATA\\yada\"\n"
+            "(that command needs an administrator PowerShell)",
+        )
+    ]
+
+
 def _path_checks() -> list[Check]:
     from .providers.catalog import ModelCatalog
 
@@ -344,6 +394,7 @@ def iter_checks() -> Iterator[Check]:
         ("Auto-paste", _paste_checks),
         ("Credentials", _credential_checks),
         ("Install", _install_checks),
+        ("Antivirus", _antivirus_checks),
         ("Paths", _path_checks),
     ):
         yield from _run_group(name, group)

@@ -77,22 +77,32 @@ def install(here: Path, root: Path, version: str) -> None:
     if not IS_WINDOWS:
         (target / EXE).chmod(0o755)
 
+    # A copy of the launcher lives beside the app in every version directory, so the app
+    # can refresh the stable one at the install root when a release changes it. Updates
+    # only ever write into versions/<v>/, so without this the root launcher installed
+    # today would never be replaced.
+    launcher_source = here / LAUNCHER_SRC
+    if launcher_source.is_file():
+        shutil.copy2(launcher_source, target / LAUNCHER_SRC)
+
     # Written last: the launcher treats this marker as the only proof a version is usable,
     # so an interrupted install is ignored rather than half-booted.
     (target / ".complete").write_text(version + "\n", encoding="utf-8")
 
-    print("  installing the launcher")
-    launcher = root / EXE
-    shutil.copy2(here / LAUNCHER_SRC, launcher)
-    if not IS_WINDOWS:
-        launcher.chmod(0o755)
+    # No launcher binary is installed at the root any more. The one that used to live
+    # there was a one-file PyInstaller executable, and Windows Defender classified it as
+    # Trojan:Win32/Bearfoos.A!ml -- a machine-learning heuristic, not a signature -- then
+    # removed it along with the Start Menu shortcut and the autostart key. The one-dir
+    # application was never touched. Shortcuts now point straight at a version's own
+    # executable, and the running version keeps them current.
     (root / "current").write_text(version + "\n", encoding="utf-8")
 
 
-def add_windows_integration(root: Path) -> None:
-    launcher = root / EXE
+def add_windows_integration(root: Path, version: str) -> None:
+    launcher = root / "versions" / version / EXE
 
-    # Start Menu shortcut, pointing at the launcher so it survives every future update.
+    # Start Menu shortcut, pointing at this version's executable. The running app rewrites
+    # it whenever a newer version takes over, which is what used to be the launcher's job.
     start_menu = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs"
     start_menu.mkdir(parents=True, exist_ok=True)
     lnk = start_menu / f"{APP}.lnk"
@@ -113,24 +123,16 @@ def add_windows_integration(root: Path) -> None:
         # A missing shortcut is cosmetic; the install is still usable.
         print(f"  note: could not create the Start Menu shortcut ({exc})")
 
-    # Start with Windows — a tray dictation tool is only useful if it is already running.
-    try:
-        import winreg
-
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.SetValueEx(key, APP, 0, winreg.REG_SZ, f'"{launcher}"')
-        print("  will start automatically with Windows")
-    except OSError as exc:
-        print(f"  note: could not register autostart ({exc})")
+    # Autostart is deliberately NOT registered here. Writing HKCU\...\Run from a binary
+    # that was created seconds ago is a significant part of the behavioural profile that
+    # got the old launcher quarantined -- Defender remediated the run key alongside the
+    # file. yada offers "start when I log in" as a setting instead, applied by the running
+    # application rather than by an installer at drop time.
+    print("  autostart is available as a setting inside yada")
 
 
-def add_linux_integration(root: Path) -> None:
-    launcher = root / EXE
+def add_linux_integration(root: Path, version: str) -> None:
+    launcher = root / "versions" / version / EXE
     bin_dir = Path.home() / ".local" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     link = bin_dir / APP
@@ -161,14 +163,14 @@ def add_linux_integration(root: Path) -> None:
     print(f"  desktop entry: {apps / (APP + '.desktop')}")
 
 
-def launch(root: Path) -> bool:
+def launch(root: Path, version: str) -> bool:
     """Start yada, so installing a tray app does something visible.
 
     Without this the installer finishes, nothing appears, and the only clue is a Start Menu
     entry the user has no reason to look for. Detached on purpose: the installer must not
     wait for the app it just started.
     """
-    launcher = root / EXE
+    launcher = root / "versions" / version / EXE
     try:
         if IS_WINDOWS:
             # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, so closing this console window
@@ -202,7 +204,7 @@ def main() -> int:
         print(f"\nInstalling yada {version}")
         print(f"into {root}\n")
 
-        missing = [n for n in (EXE, LAUNCHER_SRC) if not (here / n).exists()]
+        missing = [n for n in (EXE,) if not (here / n).exists()]
         if missing:
             raise SystemExit(
                 "This installer is missing files it needs: "
@@ -213,12 +215,12 @@ def main() -> int:
 
         install(here, root, version)
         if IS_WINDOWS:
-            add_windows_integration(root)
+            add_windows_integration(root, version)
         else:
-            add_linux_integration(root)
+            add_linux_integration(root, version)
 
         print("\n  starting yada")
-        started = launch(root)
+        started = launch(root, version)
 
         print("\n" + "=" * 52)
         print("Installed." if not started else "Installed and running.")
@@ -232,9 +234,9 @@ def main() -> int:
             print("  yada is also in your Start Menu and starts with Windows from now on.")
             print("  Your shortcut is Ctrl+Shift+; and is registered automatically.")
         else:
-            print(f"\n  Run it with: {root / EXE}")
+            print(f"\n  Run it with: {Path.home() / '.local' / 'bin' / APP}")
             print("  On Wayland, bind Ctrl+Shift+; in System Settings to:")
-            print(f"      {root / EXE} toggle")
+            print(f"      {Path.home() / '.local' / 'bin' / APP} toggle")
         print("\n  Open Settings from the tray icon and paste an API key to begin.")
         return 0
     except SystemExit as exc:

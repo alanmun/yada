@@ -151,6 +151,10 @@ class Settings:
     # a lot of flat grey on Windows, which is why blue is the default rather than an option
     # nobody finds.
     theme: str = "blue"
+    # Applied by the running app rather than by the installer. Writing an autostart key
+    # from a binary created seconds earlier is part of what got the old launcher
+    # quarantined by Defender, so this is yada's own setting to honour.
+    start_on_login: bool = True
     transcription: TranscriptionSettings = field(default_factory=TranscriptionSettings)
     transform: TransformSettings = field(default_factory=TransformSettings)
     vocabulary: Vocabulary = field(default_factory=Vocabulary)

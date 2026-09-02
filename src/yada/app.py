@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication
@@ -185,6 +187,109 @@ class YadaApp(QObject):
         if version := read_current():
             with contextlib.suppress(Exception):
                 mark_healthy(version)
+
+        self._sync_desktop_integration()
+
+    def _sync_desktop_integration(self) -> None:
+        """Keep the Start Menu shortcut and autostart entry pointing at this version.
+
+        This is the job the old launcher binary used to do by being a fixed path. It was a
+        one-file PyInstaller executable, which Defender removed as
+        Trojan:Win32/Bearfoos.A!ml along with the shortcut and the run key. Now shortcuts
+        point straight at a version's own executable and the running version repoints them,
+        which also repairs them if something else removed them.
+
+        Best-effort throughout: none of this is required for yada to work, and failing to
+        write a shortcut must never stop the app starting.
+        """
+        from .relaunch import claim_healthy, running_version_dir
+
+        claim_healthy()
+
+        here = running_version_dir()
+        if here is None:
+            return  # source checkout: nothing to point at
+        executable = here / ("yada.exe" if sys.platform == "win32" else "yada")
+        if not executable.exists():
+            return
+
+        if sys.platform == "win32":
+            self._sync_windows_integration(executable)
+        else:
+            self._sync_linux_integration(executable)
+
+    def _sync_windows_integration(self, executable: Path) -> None:
+        import subprocess
+        import winreg
+
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            lnk = (
+                Path(appdata)
+                / "Microsoft/Windows/Start Menu/Programs/yada.lnk"
+            )
+            script = (
+                f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');"
+                f"$s.TargetPath='{executable}';$s.WorkingDirectory='{executable.parent}';"
+                "$s.Description='Press a shortcut, speak, get text';$s.Save()"
+            )
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                lnk.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                    check=False,
+                    capture_output=True,
+                    timeout=30,
+                )
+
+        run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        with contextlib.suppress(OSError), winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            if self.settings.start_on_login:
+                winreg.SetValueEx(key, "yada", 0, winreg.REG_SZ, f'"{executable}"')
+            else:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    winreg.DeleteValue(key, "yada")
+
+    def _sync_linux_integration(self, executable: Path) -> None:
+        data_home = Path(
+            os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+        )
+        with contextlib.suppress(OSError):
+            bin_dir = Path.home() / ".local" / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            link = bin_dir / "yada"
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(executable)
+
+        desktop = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=yada\n"
+            "GenericName=Dictation\n"
+            "Comment=Press a shortcut, speak, get text\n"
+            f"Exec={executable}\n"
+            "Terminal=false\n"
+            "Categories=Utility;AudioVideo;\n"
+            "StartupNotify=false\n"
+        )
+        with contextlib.suppress(OSError):
+            apps = data_home / "applications"
+            apps.mkdir(parents=True, exist_ok=True)
+            (apps / "yada.desktop").write_text(desktop, encoding="utf-8")
+
+        autostart = Path(
+            os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+        ) / "autostart"
+        with contextlib.suppress(OSError):
+            entry = autostart / "yada.desktop"
+            if self.settings.start_on_login:
+                autostart.mkdir(parents=True, exist_ok=True)
+                entry.write_text(desktop, encoding="utf-8")
+            elif entry.exists():
+                entry.unlink()
 
     def _connect(self) -> None:
         self.tray.toggle_requested.connect(self.toggle)
@@ -622,6 +727,8 @@ class YadaApp(QObject):
         self._configure_chimes()
         if new_settings.theme != old.theme:
             apply_theme(self.app, new_settings.theme)
+        if new_settings.start_on_login != old.start_on_login:
+            self._sync_desktop_integration()
         self.tray.set_shortcut_label(self._shortcut_label())
         if new_settings.transcription.provider != old.transcription.provider:
             self.refresh_models("transcription")

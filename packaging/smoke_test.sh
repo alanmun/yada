@@ -100,8 +100,12 @@ echo "=== 3. the double-click installer works ==="
 ( cd "$PAYLOAD" && run_logged 120 "$WORK/install.log" "./INSTALL$EXE" )
 [ -f "$YADA_INSTALL_ROOT/current" ] || fail "no current pointer was written"
 [ -f "$YADA_INSTALL_ROOT/versions/$VERSION/.complete" ] || fail "version was not marked complete"
-[ -x "$YADA_INSTALL_ROOT/yada$EXE" ] || [ -f "$YADA_INSTALL_ROOT/yada$EXE" ] || fail "launcher not installed"
-pass "installed $(cat "$YADA_INSTALL_ROOT/current")"
+VERSION_EXE="$YADA_INSTALL_ROOT/versions/$VERSION/yada$EXE"
+[ -f "$VERSION_EXE" ] || fail "the installed version has no executable"
+# There must be no launcher binary at the install root: the one-file build that used to
+# live there was quarantined by Defender as Trojan:Win32/Bearfoos.A!ml.
+[ ! -e "$YADA_INSTALL_ROOT/yada$EXE" ] || fail "a launcher binary was installed at the root"
+pass "installed $(cat "$YADA_INSTALL_ROOT/current") with no root launcher"
 
 echo "=== 4. the app the installer started answers IPC, and shuts down ==="
 # The installer launches yada itself, so this checks that instance rather than starting a
@@ -116,7 +120,7 @@ show_app_log() {
 
 started=0
 for _ in $(seq 1 60); do
-  if "$YADA_INSTALL_ROOT/yada$EXE" status >/dev/null 2>&1; then started=1; break; fi
+  if "$VERSION_EXE" status >/dev/null 2>&1; then started=1; break; fi
   sleep 0.5
 done
 if [ "$started" != "1" ]; then
@@ -126,10 +130,10 @@ if [ "$started" != "1" ]; then
 fi
 pass "app started by the installer answers status"
 
-"$YADA_INSTALL_ROOT/yada$EXE" stop >/dev/null 2>&1 || fail "stop command failed"
+"$VERSION_EXE" stop >/dev/null 2>&1 || fail "stop command failed"
 stopped=0
 for _ in $(seq 1 40); do
-  if ! "$YADA_INSTALL_ROOT/yada$EXE" status >/dev/null 2>&1; then stopped=1; break; fi
+  if ! "$VERSION_EXE" status >/dev/null 2>&1; then stopped=1; break; fi
   sleep 0.5
 done
 if [ "$stopped" != "1" ]; then

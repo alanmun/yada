@@ -532,6 +532,15 @@ class SettingsWindow(QWidget):
         appearance_layout.addWidget(
             hint("Applies immediately. 'Match my desktop' uses your system light or dark theme.")
         )
+        self.start_on_login = QCheckBox("Start yada when I log in")
+        appearance_layout.addWidget(self.start_on_login)
+        appearance_layout.addWidget(
+            hint(
+                "A dictation shortcut is only useful if yada is already running. Registered "
+                "by yada itself rather than by the installer, which keeps antivirus "
+                "heuristics calmer about a freshly installed program."
+            )
+        )
         layout.addWidget(appearance)
 
         self.audio_device = QComboBox()
@@ -709,6 +718,7 @@ class SettingsWindow(QWidget):
         self.audio_gain.setValue(s.audio.input_gain)
 
         self._select(self.theme_combo, s.theme)
+        self.start_on_login.setChecked(s.start_on_login)
         self._select(self.paste_mode, s.output.paste_mode)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
         self.chime_transcription.set_enabled_state(s.output.chime_on_transcription)
@@ -762,6 +772,7 @@ class SettingsWindow(QWidget):
         s.audio.input_gain = float(self.audio_gain.value())
 
         s.theme = self.theme_combo.currentData() or "blue"
+        s.start_on_login = self.start_on_login.isChecked()
         s.output.paste_mode = self.paste_mode.currentData() or "off"
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
         s.output.chime_on_transcription = self.chime_transcription.is_enabled()

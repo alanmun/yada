@@ -168,37 +168,67 @@ paste time.
 
 ## Auto-update
 
-Silent, per-user, no admin rights, no installer the user has to watch.
+Silent, per-user, no admin rights, no installer to sit through.
 
 Windows cannot overwrite a running executable, so yada never tries. Every release lives in
-its own directory behind a stable launcher:
+its own directory:
 
 ```
 %LOCALAPPDATA%\yada\  (Windows)      ~/.local/share/yada/  (Linux)
-  yada[.exe]        stable launcher — shortcuts point here, never changes
-  current           active version, e.g. "0.3.1"
-  versions/0.3.0/   previous, kept for rollback
-  versions/0.3.1/   active
-  versions/0.3.2/   downloaded, verified, extracted, waiting
+  current           active version, e.g. "0.1.5"
+  versions/0.1.4/   previous, kept for rollback
+  versions/0.1.5/   active — shortcuts point straight at this one's executable
   staging/          partial downloads; safe to delete
 ```
 
 A check runs 60s after launch and every 6h. A newer release is downloaded, verified and
-**fully extracted** while the app is running, so at next launch activation is one pointer
-write — not an install. That is what makes the update either invisible or a one-second
-blink, which is the standard being held to.
+**fully extracted** while the app runs, so applying it is just starting yada again — the
+running version notices a newer one, hands over to it, and exits. That is why the
+"Restart to finish updating" action only appears once something is staged: restarting *is*
+the install step.
+
+### There is deliberately no launcher binary
+
+There used to be. A small one-file PyInstaller executable sat at the install root as a
+fixed path for shortcuts to target, read `current`, and exec'd the right version.
+
+Windows Defender classified it as **Trojan:Win32/Bearfoos.A!ml** and removed it — together
+with the Start Menu shortcut and the autostart registry key — roughly ninety seconds after
+a real install. The one-*dir* application sitting beside it was never touched.
+
+That verdict is reasonable in hindsight. A one-file build extracts itself to a temp
+directory and executes code from there, which is what a dropper does, and this one then
+wrote itself into `HKCU\...\Run` from a binary created seconds earlier. The `!ml` suffix
+means it was a machine-learning heuristic rather than a signature, and self-extracting
+unsigned executables are exactly what those models are tuned to catch.
+
+So the design changed rather than the symptom being worked around:
+
+* **No self-extracting executable is shipped.** Shortcuts point directly at
+  `versions/<v>/yada[.exe]`, a one-dir build, which was never flagged.
+* **The running version maintains its own shortcuts** (`app.py::_sync_desktop_integration`),
+  repointing them after an update and recreating them if something removed them. That is
+  the job the fixed path used to do.
+* **Autostart is a setting the app applies**, not something the installer writes at drop
+  time. It was one of the three resources Defender remediated.
+* **`yada doctor` reports antivirus action against yada's files**, so the otherwise
+  baffling "it installed and then vanished" has an answer on screen.
+
+Code signing is the only real fix for reputation, and it is not free; Azure Trusted Signing
+is the cheapest credible route if this becomes a recurring problem.
 
 **Verification.** The updater executes code it downloaded, so: SHA-256 of each archive
 checked against a `SHA256SUMS` release asset, and `SHA256SUMS` itself checked against an
 Ed25519 signature using a public key compiled into the binary. HTTPS proves the bytes came
 from GitHub; it says nothing about whether the maintainer or an account thief published
-them. Unsigned releases are refused unless `allow_unsigned` is set, which exists for local
-test builds only. Archives are also scanned for path traversal before anything is written.
+them. CI also verifies that the signature it just produced validates against the public key
+*compiled into the binaries being shipped*, so pasting the wrong half of a keypair fails the
+release instead of publishing something every client refuses.
 
-**Failure is contained.** A `.complete` marker is written last and is the only thing the
-launcher trusts, so an interrupted extraction is ignored rather than booted. A version that
-starts three times without reporting healthy stops being chosen, and the previous release
-is still on disk — a crash-on-launch release is an inconvenience, not a bricked app.
+**Failure is contained.** A `.complete` marker is written last and is the only thing trusted,
+so an interrupted extraction is ignored rather than booted. A version that starts three
+times without reporting healthy stops being chosen, and the previous release is still on
+disk.
 
 ## Packaging, and three traps in it
 
@@ -212,12 +242,13 @@ shipped a broken binary:
 
 1. **PyInstaller runs its entry script as `__main__` with no package context.** A module using
    relative imports therefore cannot be the entry point — `from . import ipc` fails with
-   "attempted relative import with no known parent package". Hence the tiny shims in
-   `packaging/entry_app.py` and `packaging/entry_launcher.py`, which import by absolute path.
-2. **The launcher must not import the updater package eagerly.** `yada/updater/__init__.py`
-   used to import `github`, which imports httpx — deliberately excluded from the launcher
-   bundle. The launcher crashed on startup. The package now imports `core` (pure standard
-   library) eagerly and everything else lazily via PEP 562 `__getattr__`.
+   "attempted relative import with no known parent package". Hence the tiny shim in
+   `packaging/entry_app.py`, which imports by absolute path.
+2. **One-file builds get quarantined.** See the auto-update section: the launcher was
+   flagged as `Trojan:Win32/Bearfoos.A!ml` and no longer exists. Everything ships one-dir.
+   `yada/updater/__init__.py` still imports lazily via PEP 562 `__getattr__` — `core` is
+   pure standard library while `github` needs httpx — which keeps import cost off the
+   startup path.
 3. **PortAudio is not bundled by the Linux `sounddevice` wheel.** `sounddevice` is a single
    module that `dlopen()`s PortAudio at import, so PyInstaller cannot see the dependency by
    static analysis. The spec locates and bundles `libportaudio` explicitly, and *fails the
@@ -243,7 +274,7 @@ src/yada/
   output/           clipboard, paste backends, chime
   ui/               tray, settings window
   updater/          install layout, GitHub releases, verification, background service
-  launcher.py       stable shim that release directories sit behind
+  relaunch.py       handing over to a newer installed version
 ```
 
 ## Config and secrets

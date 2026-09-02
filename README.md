@@ -51,6 +51,10 @@ administrator rights. Everything goes under your own user profile.
 Windows will warn that the publisher is unrecognised, because these binaries are not
 code-signed: choose **More info** then **Run anyway**.
 
+If yada installs and then disappears — no tray icon, a Start Menu shortcut that will not
+start — check Windows Security → Protection history. Unsigned programs that start with
+Windows do get caught by heuristics, and `yada doctor` will tell you if that has happened.
+
 Then open Settings from the tray icon and paste an API key.
 
 If anything looks wrong, yada can diagnose itself:

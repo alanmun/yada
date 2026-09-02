@@ -67,9 +67,6 @@ jobs:
       - name: Build the application
         run: uv run pyinstaller --noconfirm --clean packaging/yada.spec
 
-      - name: Build the launcher
-        run: uv run pyinstaller --noconfirm --clean packaging/yada-launcher.spec
-
       - name: Build the double-click installer
         run: uv run pyinstaller --noconfirm --clean packaging/installer.spec
 
@@ -81,14 +78,16 @@ jobs:
           set -eu
           # One archive, two jobs: the installer scripts make it a first-time install, and
           # the app plus _internal make it an update payload.
+          # No launcher binary is shipped. The one-file build that used to sit at the
+          # install root was quarantined by Defender as Trojan:Win32/Bearfoos.A!ml, an ML
+          # heuristic that fires readily on self-extracting executables. Shortcuts now
+          # point at a version's own one-dir executable, which was never flagged.
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp dist/yada-launcher.exe dist/yada/yada-launcher.exe
             cp dist/INSTALL.exe dist/yada/INSTALL.exe
             cp packaging/install.ps1 dist/yada/install.ps1
           else
-            cp dist/yada-launcher dist/yada/yada-launcher
             cp dist/INSTALL dist/yada/INSTALL
-            chmod +x dist/yada/yada-launcher dist/yada/yada dist/yada/INSTALL
+            chmod +x dist/yada/yada dist/yada/INSTALL
             cp packaging/install.sh dist/yada/install.sh
             chmod +x dist/yada/install.sh
           fi

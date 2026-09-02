@@ -179,7 +179,15 @@ def main(argv: list[str] | None = None) -> int:
     return _run_app()
 
 
-def _run_app(*, start_recording: bool = False) -> int:
+def _run_app(*, start_recording: bool = False, args: list[str] | None = None) -> int:
+    # Applying an update is just launching the newer version, so this is checked before
+    # anything expensive is imported. Replaces the separate launcher binary that Windows
+    # Defender quarantined; see relaunch.py.
+    from .relaunch import redirect_if_newer
+
+    if redirect_if_newer(args or []):
+        return 0
+
     from .app import main as app_main
 
     return app_main(start_recording=start_recording)

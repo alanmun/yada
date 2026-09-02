@@ -1,6 +1,6 @@
 [project]
 name = "yada"
-version = "0.1.4"
+version = "0.1.5"
 description = "Tray-resident push-to-talk dictation: hotkey, transcribe, transform, paste."
 requires-python = ">=3.11"
 dependencies = [
@@ -24,8 +24,10 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6", "pyinstaller>=6.0"]
 
 [project.scripts]
 # Also the shim KDE binds Ctrl+Shift+; to: `yada toggle` pokes the running instance over IPC.
-# The stable shim that release directories sit behind.
-yada = "yada.launcher:main"
+# Handles redirecting into a newer installed version itself; see src/yada/relaunch.py.
+# There is deliberately no separate launcher binary -- the one-file build that used to
+# serve that role was quarantined by Windows Defender as a false positive.
+yada = "yada.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
