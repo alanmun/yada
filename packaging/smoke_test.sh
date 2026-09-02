@@ -103,29 +103,28 @@ echo "=== 3. the double-click installer works ==="
 [ -x "$YADA_INSTALL_ROOT/yada$EXE" ] || [ -f "$YADA_INSTALL_ROOT/yada$EXE" ] || fail "launcher not installed"
 pass "installed $(cat "$YADA_INSTALL_ROOT/current")"
 
-echo "=== 4. the installed app boots, answers IPC, and shuts down ==="
-# Output goes to a file, not the step's pipe. A backgrounded GUI process that inherits the
-# runner's stdout keeps the handle open, and the step then hangs long after the script is
-# finished -- which is exactly how this cost a six-hour Windows job.
+echo "=== 4. the app the installer started answers IPC, and shuts down ==="
+# The installer launches yada itself, so this checks that instance rather than starting a
+# second one. An earlier version raced its own copy against the installer's: the second
+# process could not bind the command socket, so stopping the first left the second alive
+# holding the step open until the job timed out.
 APP_LOG="$WORK/app.log"
-"$YADA_INSTALL_ROOT/yada$EXE" > "$APP_LOG" 2>&1 &
-APP_PID=$!
 show_app_log() {
   echo "     --- app output ---"
   sed 's/^/     /' "$APP_LOG" 2>/dev/null || echo "     (no output captured)"
 }
+
 started=0
 for _ in $(seq 1 60); do
   if "$YADA_INSTALL_ROOT/yada$EXE" status >/dev/null 2>&1; then started=1; break; fi
   sleep 0.5
 done
 if [ "$started" != "1" ]; then
-  echo "     app never answered its socket after 30s"
+  echo "     the installer said it started yada, but nothing answered in 30s"
   show_app_log
-  kill "$APP_PID" 2>/dev/null || true
   fail "app did not start"
 fi
-pass "app started and answered status"
+pass "app started by the installer answers status"
 
 "$YADA_INSTALL_ROOT/yada$EXE" stop >/dev/null 2>&1 || fail "stop command failed"
 stopped=0
@@ -136,18 +135,14 @@ done
 if [ "$stopped" != "1" ]; then
   echo "     still answering status 20s after stop"
   show_app_log
-  # Name the surviving process, so the next fix does not need another CI round trip.
   if command -v tasklist >/dev/null 2>&1; then
     tasklist //FI "IMAGENAME eq yada.exe" 2>/dev/null | sed 's/^/     /' || true
   else
     ps -ef 2>/dev/null | grep -i "[y]ada" | sed 's/^/     /' || true
   fi
-  kill "$APP_PID" 2>/dev/null || true
   fail "app did not shut down"
 fi
 pass "app shut down cleanly"
-# Belt and braces: never leave a process holding the runner's handles.
-wait "$APP_PID" 2>/dev/null || true
 
 echo
 echo "SMOKE TEST PASSED — the built binaries run on $(uname -s)"

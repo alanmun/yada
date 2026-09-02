@@ -166,9 +166,12 @@ class YadaApp(QObject):
         if note := ensure_tray_available():
             # Better a visible complaint than an app that appears not to have started.
             print(f"yada: {note}")
-        self.tray.show()
 
-        self._start_ipc()
+        if not self._start_ipc():
+            print("yada is already running; bringing that instance forward instead.")
+            self.app.quit()
+            return
+        self.tray.show()
         self._start_hotkey()
 
         # Kick discovery and the update check after the UI is up, so neither delays the
@@ -206,7 +209,7 @@ class YadaApp(QObject):
         )
         self.bridge.quit_requested.connect(self.quit, Qt.ConnectionType.QueuedConnection)
 
-    def _start_ipc(self) -> None:
+    def _start_ipc(self) -> bool:
         def handler(command: str, _payload: dict) -> dict:
             if command == "toggle":
                 self.session.toggle()
@@ -223,9 +226,14 @@ class YadaApp(QObject):
         try:
             server.start()
         except ipc.AlreadyRunning:
-            # __main__ already checks this; reaching here means a race. Nothing to do.
-            return
+            # __main__ checks this before starting, so reaching here means another instance
+            # appeared in between. Previously this just returned, leaving a second copy
+            # running with no command socket -- invisible, unstoppable, and holding the
+            # microphone. A rival wins; we hand over our intent and leave.
+            ipc.send_command("settings")
+            return False
         self._ipc = server
+        return True
 
     def _start_hotkey(self) -> None:
         try:
