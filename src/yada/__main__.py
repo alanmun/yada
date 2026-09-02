@@ -199,8 +199,19 @@ def _notify(message: str, *, error: bool = False) -> None:
 
     yada.exe is built for the GUI subsystem, so a double-click from Explorer has nowhere
     to write. Without this, installing by double-clicking would appear to do nothing.
+
+    Suppressed whenever nobody can click it. MessageBoxW blocks until dismissed, so an
+    unattended run hangs until something kills it -- which is exactly what happened in CI,
+    where `yada install` sat at a dialog until the step timed out. A console-attached run
+    has already printed the same text, so the dialog would only be redundant there too.
     """
+    import os
+
     if sys.platform != "win32":
+        return
+    if os.environ.get("CI") or os.environ.get("YADA_NO_DIALOG"):
+        return
+    if sys.stdout is not None and sys.stdout.isatty():
         return
     try:
         import ctypes

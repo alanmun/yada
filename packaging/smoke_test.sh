@@ -40,6 +40,9 @@ mkdir -p "$HOME"
 # what happens in CI; setting it explicitly also lets this script drive a non-frozen build
 # during development, and resolves to the same directory either way.
 export YADA_PAYLOAD_DIR="$(cd "$PAYLOAD" && pwd)"
+# A modal dialog would block until something kills the step. MessageBoxW is not optional
+# about waiting for a click.
+export YADA_NO_DIALOG=1
 
 pass() { echo "  ok   $1"; }
 fail() { echo "  FAIL $1" >&2; exit 1; }

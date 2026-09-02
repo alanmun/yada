@@ -144,20 +144,21 @@ def install(*, version: str | None = None) -> Path:
     target = versions / version
     incoming = versions / f".incoming-{version}-{os.getpid()}"
     shutil.rmtree(incoming, ignore_errors=True)
-    incoming.mkdir()
 
     try:
-        internal = here / "_internal"
-        if internal.is_dir():
-            # No dirs_exist_ok: the destination was just created, so there is nothing to
-            # merge with. Merging is how two releases used to blend into one directory.
-            shutil.copytree(internal, incoming / "_internal")
-        shutil.copy2(here / exe, incoming / exe)
-        for extra in ("VERSION", "README.txt"):
-            if (here / extra).exists():
-                shutil.copy2(here / extra, incoming / extra)
+        # The whole payload, verbatim. An earlier version picked out the executable,
+        # _internal and a couple of known files, and the result segfaulted: a PyInstaller
+        # one-dir bundle is not reliably reproducible by copying the parts you remember,
+        # and on Linux it contains symlinks that must stay symlinks. Copying everything
+        # cannot forget a file, and symlinks=True preserves the bundle exactly as the
+        # archive was extracted.
+        shutil.copytree(here, incoming, symlinks=True)
+
+        exe_path = incoming / exe
+        if not exe_path.exists():
+            raise InstallError(f"The copied files do not contain {exe}.")
         if sys.platform != "win32":
-            (incoming / exe).chmod(0o755)
+            exe_path.chmod(0o755)
 
         _empty_target(target)
         os.replace(incoming, target)
