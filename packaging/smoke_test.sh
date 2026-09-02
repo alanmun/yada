@@ -41,27 +41,51 @@ export YADA_INSTALLER_NO_PAUSE=1  # the installer must never block on input here
 pass() { echo "  ok   $1"; }
 fail() { echo "  FAIL $1" >&2; exit 1; }
 
+# Every invocation is bounded and streamed.
+#
+# Bounded, because a wedged binary should cost seconds and a clear message, not the whole
+# step budget. Streamed via tee rather than captured into a variable, because command
+# substitution shows nothing until the process exits -- a hang then produces a completely
+# silent failure, which is how two Windows runs were burned learning nothing.
+run_logged() {
+  local secs="$1" log="$2"
+  shift 2
+  local rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
+  else
+    "$@" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
+  fi
+  if [ "$rc" = "124" ]; then
+    echo "     (timed out after ${secs}s)"
+  fi
+  return "$rc"
+}
+
 echo "=== 1. the application binary starts and can print ==="
 # Also proves the Windows console-attach path: yada.exe is a GUI-subsystem binary and
 # would otherwise emit nothing at all here.
-out="$("$PAYLOAD/yada$EXE" --version 2>&1 || true)"
-echo "     --version -> ${out:-<nothing>}"
+run_logged 60 "$WORK/version.log" "$PAYLOAD/yada$EXE" --version || true
+out="$(cat "$WORK/version.log" 2>/dev/null || true)"
 [ -n "$out" ] || fail "--version printed nothing (console attach or startup is broken)"
-case "$out" in *"$VERSION"*) pass "reports version $VERSION" ;; *) fail "expected $VERSION" ;; esac
+case "$out" in *"$VERSION"*) pass "reports version $VERSION" ;; *) fail "expected $VERSION, got: $out" ;; esac
 
 echo "=== 2. the full import graph loads ==="
 # doctor touches Qt, numpy, soxr, sounddevice, httpx and keyring. Exit code 1 is expected
 # and fine: a CI runner has no microphone. Silence is not.
 set +e
-doctor="$("$PAYLOAD/yada$EXE" doctor 2>&1)"
+run_logged 120 "$WORK/doctor.log" "$PAYLOAD/yada$EXE" doctor
 doctor_rc=$?
 set -e
-echo "$doctor" | sed 's/^/     /'
-[ -n "$doctor" ] || fail "doctor printed nothing"
-case "$doctor" in *"yada doctor"*) pass "doctor ran (exit $doctor_rc)" ;; *) fail "unexpected doctor output" ;; esac
+doctor="$(cat "$WORK/doctor.log" 2>/dev/null || true)"
+[ -n "$doctor" ] || fail "doctor printed nothing at all"
+case "$doctor" in
+  *"yada doctor"*) pass "doctor ran (exit $doctor_rc)" ;;
+  *) fail "doctor produced unexpected output" ;;
+esac
 
 echo "=== 3. the double-click installer works ==="
-( cd "$PAYLOAD" && ./INSTALL$EXE ) | sed 's/^/     /'
+( cd "$PAYLOAD" && run_logged 120 "$WORK/install.log" "./INSTALL$EXE" )
 [ -f "$YADA_INSTALL_ROOT/current" ] || fail "no current pointer was written"
 [ -f "$YADA_INSTALL_ROOT/versions/$VERSION/.complete" ] || fail "version was not marked complete"
 [ -x "$YADA_INSTALL_ROOT/yada$EXE" ] || [ -f "$YADA_INSTALL_ROOT/yada$EXE" ] || fail "launcher not installed"

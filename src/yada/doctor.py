@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator
@@ -109,41 +110,59 @@ def _audio_checks() -> list[Check]:
     ]
 
 
-def _qt_checks() -> list[Check]:
-    """Whether a system tray exists.
+def _probe_command() -> list[str]:
+    """How to re-invoke ourselves for the out-of-process tray probe."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--probe-tray"]
+    return [sys.executable, "-m", "yada", "--probe-tray"]
 
-    Answering needs a live QApplication, which is the single most likely thing in this
-    whole report to block: constructing one touches the window system, and in a service
-    session or over a broken display connection it can sit there indefinitely. The
-    per-group deadline in _run_group is what makes attempting it safe.
+
+def _qt_checks() -> list[Check]:
+    """Whether a system tray exists, asked in a child process.
+
+    This looks like overkill for one boolean, and it is not. Answering requires a live
+    QApplication; constructing one touches the window system and, on Windows in a
+    non-interactive session, can block inside a Win32 call while holding the GIL. That
+    freezes every thread in the process, so a thread-based timeout cannot help -- the
+    symptom is `yada doctor` printing nothing and never returning. A child process can
+    simply be killed.
     """
     try:
-        from PySide6.QtWidgets import QApplication, QSystemTrayIcon
-    except ImportError as exc:
-        return [Check("Tray icon", FAIL, f"PySide6 is not installed ({exc})", "uv sync")]
-
-    existing = QApplication.instance()
-    app = existing or QApplication([])
-    try:
-        available = QSystemTrayIcon.isSystemTrayAvailable()
-    finally:
-        if existing is None:
-            # Tear it down rather than leaving a live QApplication in the process; on
-            # Windows a dangling one can stall interpreter shutdown.
-            app.quit()
-            del app
-
-    if available:
-        return [Check("Tray icon", OK, "a system tray is available")]
-    return [
-        Check(
-            "Tray icon",
-            WARN,
-            "no system tray in this session",
-            "On GNOME install the AppIndicator extension. On KDE the tray is built in. "
-            "yada still works via its shortcut, but you will not see an icon.",
+        proc = subprocess.run(
+            _probe_command(),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
         )
-    ]
+    except subprocess.TimeoutExpired:
+        return [
+            Check(
+                "Tray icon",
+                WARN,
+                "could not determine tray availability (the probe did not respond)",
+                "Qt could not initialise in this session. yada may still run; if the tray "
+                "icon never appears, this is why.",
+            )
+        ]
+    except OSError as exc:
+        return [Check("Tray icon", WARN, f"could not run the tray probe ({exc})")]
+
+    verdict = (proc.stdout or "").strip()
+    if verdict == "1":
+        return [Check("Tray icon", OK, "a system tray is available")]
+    if verdict == "0":
+        return [
+            Check(
+                "Tray icon",
+                WARN,
+                "no system tray in this session",
+                "On GNOME install the AppIndicator extension. On KDE the tray is built in. "
+                "yada still works via its shortcut, but you will not see an icon.",
+            )
+        ]
+    detail = (proc.stderr or "").strip()[:160] or f"exit {proc.returncode}"
+    return [Check("Tray icon", WARN, f"tray probe failed: {detail}")]
 
 
 def _hotkey_checks() -> list[Check]:

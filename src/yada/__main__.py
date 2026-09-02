@@ -109,6 +109,22 @@ def main(argv: list[str] | None = None) -> int:
         print("yada is not running — starting it.")
         return _run_app(start_recording=(command == "toggle"))
 
+    if command == "--probe-tray":
+        # Internal, used by `yada doctor`. Answering "is there a system tray" requires a
+        # live QApplication, and constructing one can block inside a Win32 call while
+        # holding the GIL -- which freezes the whole interpreter, so no in-process timeout
+        # can rescue it. Run here in a child process the parent can kill instead.
+        try:
+            from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+
+            app = QApplication([])
+            print("1" if QSystemTrayIcon.isSystemTrayAvailable() else "0")
+            app.quit()
+        except Exception as exc:  # noqa: BLE001 - the parent only needs a verdict
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
     if command == "doctor":
         # Deliberately ahead of the IPC checks: doctor must work whether or not yada is
         # running, and it is the first thing to reach for when it will not start.
