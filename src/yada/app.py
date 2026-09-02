@@ -28,6 +28,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
 from . import config, ipc, secrets
+from .audio import warm_up as warm_up_audio
 from .config import Settings
 from .hotkey import Combo, InvalidCombo, create_backend
 from .output import ChimePlayer, copy, create_paste_backend
@@ -181,6 +182,11 @@ class YadaApp(QObject):
         self.tray.show()
         self._apply_notification_setting()
         self._start_hotkey()
+        # On its own thread rather than the loop: PortAudio initialisation is blocking C
+        # code, and the point is to keep it away from anything that is being waited on.
+        threading.Thread(
+            target=warm_up_audio, name="yada-audio-warmup", daemon=True
+        ).start()
 
         # Kick discovery and the update check after the UI is up, so neither delays the
         # tray icon appearing.

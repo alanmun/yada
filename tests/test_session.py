@@ -438,3 +438,130 @@ async def test_shutdown_is_safe_mid_recording(fake_audio):
     await sess.toggle_async()
     await sess.shutdown()
     assert sess.state is SessionState.IDLE
+
+
+# --------------------------------------------------------------------------------------
+# Nothing the user can perceive waits for the network
+# --------------------------------------------------------------------------------------
+
+
+class SlowOpenTranscriber(FakeTranscriber):
+    """A provider whose socket takes as long to open as the caller allows."""
+
+    def __init__(self, **kwargs):
+        super().__init__(streaming=True, **kwargs)
+        self.released = asyncio.Event()
+        self.open_started = asyncio.Event()
+
+    async def open_stream(self, opts):
+        self.open_started.set()
+        await self.released.wait()
+        return self._stream or FakeStream()
+
+
+async def test_the_listening_chime_does_not_wait_for_the_socket(fake_audio):
+    """The reported bug: about three seconds before anything happened.
+
+    Opening the socket -- DNS, TLS, handshake, a `session.updated` round trip, measured at
+    0.3-1.3s and sometimes worse -- sat in front of the state change and the chime. The
+    chime is the only confirmation the shortcut fired at all, so it has to come first.
+    """
+    stream = FakeStream()
+    stt = SlowOpenTranscriber(stream=stream)
+    sess, rec, _ = build(transcriber=stt)
+
+    await sess.toggle_async()
+
+    assert sess.state is SessionState.RECORDING, "recording must start before the socket"
+    assert rec.chimes == [Stage.LISTENING], "the chime must not wait on the network"
+    # Not even started: the connect is a task that has not been given a turn yet, so it
+    # contributes nothing at all to the time between the keypress and the chime.
+    assert not stt.open_started.is_set()
+    await asyncio.sleep(0)
+    assert stt.open_started.is_set(), "the connect should then proceed on its own"
+
+    stt.released.set()
+    await sess.toggle_async()
+    assert rec.finished[0].transcript == "hello world"
+
+
+async def test_audio_spoken_during_the_connect_still_reaches_the_stream(fake_audio):
+    """It used to not even be recorded.
+
+    The microphone was opened *after* the socket, so anything said while connecting was
+    gone -- not merely missing from the live transcript. The sink is attached first now and
+    its queue is drained once the pump starts, so the stream still gets the first words.
+    """
+    stream = FakeStream()
+    stt = SlowOpenTranscriber(stream=stream)
+    sess, rec, _ = build(transcriber=stt)
+
+    await sess.toggle_async()
+    capture = fake_audio.instances[-1]
+    assert capture.started, "the microphone is open while the socket is still connecting"
+    fed_before = stream.fed
+    assert fed_before == 0, "nothing can have been sent yet -- there is no socket"
+
+    # More speech, still mid-connect.
+    capture.on_frames(PCM)
+    stt.released.set()
+    await sess.toggle_async()
+
+    assert stream.fed > 0, "the queued audio must be sent once the socket arrives"
+    assert rec.finished[0].streamed is True
+
+
+async def test_a_recording_shorter_than_the_connect_still_streams(fake_audio):
+    """Stopping before the socket is open must not silently mean batch.
+
+    For a realtime-only model such as gpt-live-transcribe batch is an HTTP 404, so
+    abandoning a half-open connect would produce no transcript at all.
+    """
+    stream = FakeStream()
+    stt = SlowOpenTranscriber(stream=stream)
+    sess, rec, _ = build(transcriber=stt)
+
+    await sess.toggle_async()
+    stop = asyncio.create_task(sess.toggle_async())
+    await asyncio.sleep(0)  # let the stop reach the point where it waits
+    stt.released.set()
+    await stop
+
+    assert rec.finished[0].streamed is True, "the stop should wait briefly for the socket"
+    assert stt.batch_calls == 0, "batch is not a fallback for a realtime-only model"
+
+
+async def test_a_connect_that_never_arrives_does_not_hang_the_stop(fake_audio, monkeypatch):
+    """A dead network must cost the grace period, not the dictation."""
+    monkeypatch.setattr(session_mod, "STREAM_CONNECT_GRACE", 0.05)
+    stt = SlowOpenTranscriber(stream=FakeStream(), batch_text="rescued")
+    sess, rec, _ = build(transcriber=stt)
+
+    await sess.toggle_async()
+    await sess.toggle_async()  # never released
+
+    assert rec.finished[0].transcript == "rescued"
+    assert stt.batch_calls == 1
+    assert any("did not finish opening" in w for w in rec.finished[0].warnings)
+
+
+async def test_a_failed_connect_stops_queueing_audio(fake_audio):
+    """A sink left on the tee fills up and reports phantom dropped audio.
+
+    The drop count is shown to the user as lost audio, so a stream that never existed must
+    not produce one.
+    """
+    stt = FakeTranscriber(streaming=True, open_fails="no route to host", batch_text="ok")
+    sess, rec, _ = build(transcriber=stt)
+
+    await sess.toggle_async()
+    await asyncio.sleep(0)  # let the connect task fail
+    capture = fake_audio.instances[-1]
+    for _ in range(400):  # far more than the sink's queue would hold
+        capture.on_frames(PCM)
+    await sess.toggle_async()
+
+    assert rec.finished[0].transcript == "ok"
+    assert not any("dropped" in w for w in rec.finished[0].warnings), (
+        "a stream that never opened must not report dropped audio"
+    )

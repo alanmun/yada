@@ -70,6 +70,23 @@ def list_input_devices() -> list[DeviceInfo]:
     return out
 
 
+def warm_up() -> None:
+    """Initialise PortAudio before the first recording, off the start path.
+
+    `import sounddevice` initialises PortAudio, and enumerating devices walks every endpoint
+    the host offers -- neither is free on Windows. Paid on the first keypress it lands
+    squarely between the shortcut and the listening chime, which is the one delay the user
+    cannot be asked to tolerate: the chime is the only confirmation the shortcut fired.
+
+    Failures are ignored on purpose. This is a cache warm; anything genuinely wrong with the
+    audio stack is reported properly when a recording is actually attempted.
+    """
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        list_input_devices()
+
+
 def resolve_device(name: str | None) -> int | None:
     """Map a stored device name back to an index.
 

@@ -87,6 +87,11 @@ class SessionDeps:
     deliver: Callable[[str, Stage], None]
 
 
+# How long a stop will wait for a socket that is still opening. Long enough to cover a slow
+# connect, short enough that a dead network does not hold the transcript hostage.
+STREAM_CONNECT_GRACE = 3.0
+
+
 class DictationSession:
     def __init__(self, loop: asyncio.AbstractEventLoop, deps: SessionDeps) -> None:
         self._loop = loop
@@ -99,6 +104,9 @@ class DictationSession:
         self._stream_session = None
         self._pump: asyncio.Task | None = None
         self._delta_reader: asyncio.Task | None = None
+        # Opening the socket happens off the start path, so it is a task that may still be
+        # in flight when the user stops talking. See `_start`.
+        self._stream_connect: asyncio.Task | None = None
         self._partial = ""
         self._started_at = 0.0
         self._busy = asyncio.Lock()
@@ -152,10 +160,27 @@ class DictationSession:
         self._stream_sink = None
         self._stream_session = None
 
-        # Attach the streaming sink only if this provider can stream and the user wants it.
-        # Failure here is not fatal -- the buffer path covers it.
-        if settings.transcription.prefer_streaming and provider.capabilities().streaming:
-            await self._try_open_stream(provider, opts)
+        # Streaming is set up in two halves, and the order matters more than it looks.
+        #
+        # Opening the socket used to happen here, before the microphone: DNS, TLS, the
+        # websocket handshake and a `session.updated` round trip, measured at 0.3-1.3s and
+        # occasionally worse. Everything the user can perceive -- the state change and the
+        # listening chime -- waited behind it, so pressing the shortcut appeared to do
+        # nothing for up to three seconds. Worse than the lag: the microphone was not open
+        # yet, so anything said in that window was not merely missing from the live
+        # transcript, it was never recorded at all.
+        #
+        # So the sink is attached now and the socket is opened afterwards, in the
+        # background. The sink queues about twenty seconds of audio, which is ample cover
+        # for a connect, and the queued chunks are sent the moment the pump starts -- so
+        # the live transcript still begins at the first word.
+        streaming = (
+            settings.transcription.prefer_streaming and provider.capabilities().streaming
+        )
+        if streaming:
+            sink = StreamSink(self._loop)
+            self._stream_sink = sink
+            self._tee.add(sink)
 
         self._capture = AudioCapture(
             self._tee,
@@ -173,26 +198,59 @@ class DictationSession:
         self._started_at = time.monotonic()
         self._set_state(SessionState.RECORDING)
         # After the microphone is actually open, so the chime means "listening", not
-        # "tried to listen".
+        # "tried to listen". Nothing slower than that is allowed in front of it.
         self._deps.chime(Stage.LISTENING)
 
-    async def _try_open_stream(
+        if streaming:
+            self._stream_connect = asyncio.create_task(self._open_stream(provider, opts))
+
+    async def _open_stream(
         self, provider: TranscriptionProvider, opts: TranscribeOptions
     ) -> None:
+        """Open the live socket while recording is already under way.
+
+        Runs as a task so nothing the user can hear or see waits for the network. Audio has
+        been queueing in the sink since the microphone opened, and starting the pump drains
+        it in order, so the transcript still starts at the beginning of the recording.
+        """
+        sink = self._stream_sink
         try:
             session = await provider.open_stream(opts)
         except Exception as exc:  # noqa: BLE001 - any failure just means batch instead
             self._deps.events.on_warning(
                 f"Live transcription unavailable, will transcribe on stop ({exc})"
             )
+            self._detach_stream_sink(sink)
+            return
+        if self._tee is None or sink is not self._stream_sink:
+            # The recording was torn down or replaced while the socket was opening, so
+            # there is nothing to attach it to, and leaving it open would hold a paid
+            # session for a recording that no longer exists.
+            #
+            # Deliberately *not* keyed on the state being RECORDING: a recording shorter
+            # than the connect ends with the state already moved on to TRANSCRIBING, and
+            # that session is exactly the one the stop path is waiting for. Checking the
+            # state here threw it away and fell back to batch on every short dictation.
+            with contextlib.suppress(Exception):
+                await session.abort()
             return
         self._stream_session = session
-        sink = StreamSink(self._loop)
-        self._stream_sink = sink
-        assert self._tee is not None
-        self._tee.add(sink)
         self._pump = asyncio.create_task(sink.pump(session.feed))
         self._delta_reader = asyncio.create_task(self._read_deltas(session))
+
+    def _detach_stream_sink(self, sink: StreamSink | None) -> None:
+        """Stop queueing audio nobody is going to send.
+
+        Without this a failed connect leaves the sink on the tee, filling its queue for the
+        rest of the recording and counting every chunk past the cap as dropped -- which
+        then gets reported to the user as lost audio, from a stream that never existed.
+        """
+        if sink is None:
+            return
+        if self._tee is not None:
+            self._tee.remove(sink)
+        if sink is self._stream_sink:
+            self._stream_sink = None
 
     async def _read_deltas(self, session) -> None:
         try:
@@ -279,6 +337,7 @@ class DictationSession:
     async def _transcribe(self, buffer: WavBuffer) -> tuple[str, bool, list[str]]:
         """Prefer the already-open stream; fall back to batch on any failure."""
         warnings: list[str] = []
+        await self._settle_stream_connect(warnings)
         if self._stream_sink is not None and self._stream_session is not None:
             self._stream_sink.flush()
             if self._pump is not None:
@@ -334,7 +393,35 @@ class DictationSession:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
+    async def _settle_stream_connect(self, warnings: list[str]) -> None:
+        """Give a socket that is still opening a moment to arrive before choosing a path.
+
+        A recording can easily be shorter than a connect. Abandoning it the instant the
+        user stops talking would mean using batch instead -- and for a realtime-only model
+        such as gpt-live-transcribe that is not a fallback, it is an HTTP 404 and no
+        transcript at all.
+        """
+        task, self._stream_connect = self._stream_connect, None
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(task, timeout=STREAM_CONNECT_GRACE)
+        except (TimeoutError, asyncio.CancelledError):
+            # wait_for has already cancelled it.
+            warnings.append("The live connection did not finish opening in time.")
+        except Exception:  # noqa: BLE001 - it reports its own failure as a warning
+            return
+
+    async def _cancel_stream_connect(self) -> None:
+        task, self._stream_connect = self._stream_connect, None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
     async def _abort_stream(self) -> None:
+        await self._cancel_stream_connect()
         await self._cancel_delta_reader()
         task, self._pump = self._pump, None
         if task is not None:
@@ -350,6 +437,9 @@ class DictationSession:
     def _reset(self) -> None:
         if self._tee is not None:
             self._tee.clear()
+        task, self._stream_connect = self._stream_connect, None
+        if task is not None:
+            task.cancel()
         self._buffer = None
         self._tee = None
         self._stream_sink = None

@@ -168,6 +168,35 @@ steps**; each step is `prompt_transform` (LLM call) or `find_replace` (literal o
 compose, so "fix my known misspellings deterministically, then clean up grammar with an LLM" is
 expressible without special-casing.
 
+### Nothing perceivable waits for the network
+
+Starting a recording used to be strictly serial: open the realtime socket, then open the
+microphone, then set the state and play the listening chime. Measured against the live API
+the socket alone is 0.3-1.3s (DNS, TLS, handshake, and the `session.updated` round trip
+added above), so pressing the shortcut appeared to do nothing for up to three seconds.
+
+The latency was the smaller half of the problem. The microphone was opened *after* the
+socket, so anything said in that window was not merely missing from the live transcript --
+it was never recorded at all.
+
+The order is now: attach the stream sink, open the microphone, set the state, chime, and
+*then* open the socket as a background task. `StreamSink` already queues about twenty
+seconds of audio and drops only past that, so the queued chunks are drained in order the
+moment the pump starts and the live transcript still begins at the first word. Two
+consequences worth knowing:
+
+* A recording can be shorter than its own connect, so the stop path waits up to
+  `STREAM_CONNECT_GRACE` for a socket still opening. Abandoning it would mean batch, and
+  for a realtime-only model batch is an HTTP 404 and no transcript at all.
+* The task must not key its "is this still wanted?" check on the state being `RECORDING` --
+  by the time it runs on a short dictation the state has moved to `TRANSCRIBING`, and that
+  is precisely the session the stop path is waiting for. It checks the session's identity
+  instead.
+
+PortAudio is warmed on a background thread at launch for the same reason: `import
+sounddevice` initialises it and enumerating devices walks every endpoint the host offers,
+which is not free on Windows and was otherwise paid on the first keypress.
+
 ## Chimes
 
 Two distinct sounds — one when transcription completes, one when transformation completes — via
