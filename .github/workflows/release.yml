@@ -173,11 +173,33 @@ jobs:
           fi
 
       - name: Publish the release
+        # Idempotent and retried on purpose. Asset upload is a large multipart request to
+        # GitHub and a transient 502 mid-upload is a normal failure mode -- one cost 0.1.1
+        # a manual re-run, having already created the tag. Creating the release and
+        # uploading the assets are now separate, both safe to repeat.
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.value }}
         run: |
-          gh release create "v${VERSION}" staging/* \
-            --title "yada ${VERSION}" \
-            --generate-notes \
-            --notes "Installed copies of yada will pick this up automatically in the background and use it at next launch."
+          set -eu
+          NOTES="Installed copies of yada pick this up automatically in the background and use it at next launch."
+
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "release v${VERSION} already exists, reusing it"
+          else
+            gh release create "v${VERSION}" \
+              --title "yada ${VERSION}" \
+              --generate-notes \
+              --notes "$NOTES"
+          fi
+
+          for attempt in 1 2 3; do
+            if gh release upload "v${VERSION}" staging/* --clobber; then
+              echo "assets uploaded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "upload attempt ${attempt} failed; retrying in 15s"
+            sleep 15
+          done
+          echo "::error::asset upload failed after 3 attempts"
+          exit 1

@@ -81,3 +81,49 @@ def test_every_group_is_covered_by_a_deadline():
     source = inspect.getsource(doctor.iter_checks)
     assert "_run_group" in source
     assert source.count("yield") >= 1
+
+
+def test_console_streams_are_forced_to_utf8(monkeypatch):
+    """Windows consoles default to cp1252, which cannot encode our own help text.
+
+    An earlier fix returned early whenever stdout was already usable, so a redirected
+    stream -- `yada doctor > out.txt`, or any CI capture -- never got reconfigured and
+    kept raising UnicodeEncodeError partway through the report.
+    """
+    import io
+    import sys
+
+    from yada import __main__ as entry
+
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    calls: list[tuple[str, object]] = []
+
+    class FakeKernel32:
+        @staticmethod
+        def SetConsoleOutputCP(cp):
+            calls.append(("SetConsoleOutputCP", cp))
+            return 1
+
+    class FakeCtypes:
+        class windll:
+            kernel32 = FakeKernel32()
+
+    entry._force_utf8_streams(FakeCtypes)
+
+    assert ("SetConsoleOutputCP", 65001) in calls
+    assert stream.encoding == "utf-8"
+    assert stream.errors == "replace"
+    # The exact character that killed doctor on Windows.
+    stream.write("Open Settings → Providers")
+    stream.flush()
+
+
+def test_prepare_console_is_a_noop_off_windows(monkeypatch):
+    import sys
+
+    from yada import __main__ as entry
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    entry._prepare_console()  # must not raise or touch anything

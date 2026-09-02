@@ -12,65 +12,62 @@ import contextlib
 import sys
 
 
+def _stdout_usable() -> bool:
+    """Whether we already have somewhere to write."""
+    if sys.stdout is None:
+        return False
+    try:
+        sys.stdout.write("")
+        sys.stdout.flush()
+    except (OSError, ValueError, AttributeError):
+        return False
+    return True
+
+
 def _prepare_console() -> None:
     """On Windows, make CLI output both visible and encodable.
 
-    yada.exe is built for the GUI subsystem, because a tray app must not flash a console
-    window on every launch. The cost is that it starts with no stdout at all: run
-    `yada doctor` from PowerShell and it prints nothing, succeeds, and tells you nothing.
-
-    Two separate problems, both Windows-only:
+    Two independent problems:
 
     * yada.exe is built for the GUI subsystem, because a tray app must not flash a console
       window on every launch. The cost is that it starts with no stdout at all: run
       `yada doctor` from PowerShell and it prints nothing, succeeds, and tells you nothing.
       AttachConsole(ATTACH_PARENT_PROCESS) borrows the terminal that launched us.
 
-    * The console's default code page is cp1252, which cannot encode the arrows, em-dashes
-      and ellipses in our own help text. Writing one raised UnicodeEncodeError and killed
-      `yada doctor` halfway through its report. The code page is switched to UTF-8 and the
-      streams are reconfigured with errors="replace", so output is correct on a modern
-      terminal and merely imperfect on a legacy one -- never fatal.
+    * The console's default code page is cp1252, which cannot encode the arrows and
+      em-dashes in our own help text. Writing one raised UnicodeEncodeError and killed
+      `yada doctor` partway through its report.
+
+    These are deliberately handled in that order and *independently*. An earlier version
+    returned early once it found a usable stdout, which meant a redirected stream -- the
+    common case, including `yada doctor > out.txt` and every CI capture -- never got the
+    encoding fix and kept crashing. A pipe is exactly as cp1252 as a console.
     """
     if sys.platform != "win32":
         return
-
-    # If stdout already works, leave it alone. A GUI-subsystem process launched with its
-    # output redirected (`yada doctor > out.txt`, or captured by a CI step) does get real
-    # handles, and reopening CONOUT$ would write past the redirection to the console
-    # device instead -- output would appear on screen but vanish from the capture.
-    if sys.stdout is not None:
-        try:
-            sys.stdout.write("")
-            sys.stdout.flush()
-            return
-        except (OSError, ValueError, AttributeError):
-            pass
-
     try:
         import ctypes
     except ImportError:
         return
 
-    # Independent of whether we own the console: fix encoding first, since a redirected
-    # stream can be just as cp1252 as an attached one.
-    _force_utf8_streams(ctypes)
+    if not _stdout_usable():
+        try:
+            ATTACH_PARENT_PROCESS = -1
+            if ctypes.windll.kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+                # Not context-managed on purpose: these replace the process-wide standard
+                # streams and must stay open for the lifetime of the process.
+                sys.stdout = open(  # noqa: SIM115
+                    "CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace"
+                )
+                sys.stderr = open(  # noqa: SIM115
+                    "CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace"
+                )
+                sys.stdin = open("CONIN$", encoding="utf-8", errors="replace")  # noqa: SIM115
+        except Exception:  # noqa: BLE001 - no console is a normal state, never a failure
+            pass
 
-    try:
-        ATTACH_PARENT_PROCESS = -1
-        if not ctypes.windll.kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
-            return
-        # Not context-managed on purpose: these replace the process-wide standard streams
-        # and must stay open for the lifetime of the process.
-        sys.stdout = open(  # noqa: SIM115
-            "CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace"
-        )
-        sys.stderr = open(  # noqa: SIM115
-            "CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace"
-        )
-        sys.stdin = open("CONIN$", encoding="utf-8", errors="replace")  # noqa: SIM115
-    except Exception:  # noqa: BLE001 - no console is a normal state, never a failure
-        return
+    # Unconditional: applies to a borrowed console and a redirected pipe alike.
+    _force_utf8_streams(ctypes)
 
 
 def _force_utf8_streams(ctypes_module) -> None:

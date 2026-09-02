@@ -80,9 +80,21 @@ set -e
 doctor="$(cat "$WORK/doctor.log" 2>/dev/null || true)"
 [ -n "$doctor" ] || fail "doctor printed nothing at all"
 case "$doctor" in
-  *"yada doctor"*) pass "doctor ran (exit $doctor_rc)" ;;
+  *"yada doctor"*) : ;;
   *) fail "doctor produced unexpected output" ;;
 esac
+# Exit 0 means everything is fine, 1 means it found problems -- both are correct outcomes
+# on a machine with no microphone. Anything else means doctor itself broke, and an earlier
+# version of this check accepted a timeout (124) as a pass, hiding a crash for two releases.
+case "$doctor_rc" in
+  0 | 1) : ;;
+  124) fail "doctor timed out (exit 124) — it hung instead of reporting" ;;
+  *) fail "doctor exited $doctor_rc, which means doctor itself failed" ;;
+esac
+case "$doctor" in
+  *Traceback*) fail "doctor raised an exception (see the report above)" ;;
+esac
+pass "doctor ran cleanly (exit $doctor_rc)"
 
 echo "=== 3. the double-click installer works ==="
 ( cd "$PAYLOAD" && run_logged 120 "$WORK/install.log" "./INSTALL$EXE" )
