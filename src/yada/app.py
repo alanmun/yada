@@ -543,11 +543,15 @@ class YadaApp(QObject):
             self.settings_window.flush_pending_save()
             self.settings_window.flush_pending_keys()
             self.settings_window.load(self.settings)
-        self._push_status_to_settings()
-        self._refresh_stale_models()
+        # Shown first on purpose: `_push_status_to_settings` skips a window that is not
+        # visible, so pushing before showing meant the model pickers were never populated
+        # on the first open -- they sat empty until something else happened to trigger a
+        # refresh, which read as "the list is empty, click Refresh".
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
+        self._push_status_to_settings()
+        self._refresh_stale_models()
 
     def check_updates(self) -> None:
         """Show the window on the Updates tab, then run the check.
@@ -844,9 +848,11 @@ class YadaApp(QObject):
             return
         stt_id = self.settings.transcription.provider
         stt_entry = self.catalog.entry(stt_id)
+        stt_models = stt_entry.for_modality(Modality.TRANSCRIPTION)
         window.stt_model.set_models(
-            stt_entry.for_modality(Modality.TRANSCRIPTION),
+            stt_models,
             current=self.settings.transcription.model,
+            recommended=self._recommended(stt_id, Modality.TRANSCRIPTION, stt_models),
         )
         window.stt_model.set_status(self._model_status(stt_id, stt_entry))
         _, drift = self.catalog.resolve_model(
@@ -856,8 +862,11 @@ class YadaApp(QObject):
 
         tf_id = self.settings.transform.provider
         tf_entry = self.catalog.entry(tf_id)
+        tf_models = tf_entry.for_modality(Modality.TEXT)
         window.tf_model.set_models(
-            tf_entry.for_modality(Modality.TEXT), current=self.settings.transform.model
+            tf_models,
+            current=self.settings.transform.model,
+            recommended=self._recommended(tf_id, Modality.TEXT, tf_models),
         )
         window.tf_model.set_status(self._model_status(tf_id, tf_entry))
 
@@ -881,6 +890,13 @@ class YadaApp(QObject):
             window.set_update_status(self._updates.status.summary())
             window.set_update_ready(self._updates.status.ready_version)
         window.refresh_key_status()
+
+    def _recommended(self, provider_id: str, modality: Modality, models) -> str:
+        """The provider's curated pick, if discovery actually returned it."""
+        spec = SPECS.get(provider_id)
+        if spec is None:
+            return ""
+        return spec.recommended(modality, [m.id for m in models])
 
     def _model_status(self, provider_id: str, entry) -> str:
         """What to say under a model picker.

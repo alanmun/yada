@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -95,6 +96,21 @@ def _scrollable(inner: QWidget) -> QScrollArea:
     area.setFrameShape(QScrollArea.Shape.NoFrame)
     area.setWidget(inner)
     return area
+
+
+def _recommendation_lines(spec) -> list[str]:
+    """The curated pick per modality, as lines for the provider panel.
+
+    The first candidate is shown rather than the one discovery returned: this panel is
+    about the provider, not about a particular model list, and the picker on the Transcribe
+    and Transform tabs marks whichever pick is actually available.
+    """
+    lines = []
+    if spec.transcribes and spec.recommended_transcription:
+        lines.append(f"    \u2022 Transcription \u2014 {spec.recommended_transcription[0]}")
+    if spec.transforms and spec.recommended_transform:
+        lines.append(f"    \u2022 Transform \u2014 {spec.recommended_transform[0]}")
+    return lines
 
 
 class SettingsWindow(QWidget):
@@ -199,64 +215,39 @@ class SettingsWindow(QWidget):
     # ==================================================================================
 
     def _build_providers(self) -> QWidget:
+        """One provider at a time.
+
+        Every provider used to be stacked on the page at once, so setting up OpenAI meant
+        scrolling past OpenRouter's key field and notes. The chooser picks which one you
+        are configuring; everything below it belongs to that provider.
+        """
         page = QWidget()
         layout = QVBoxLayout(page)
+
+        self.provider_chooser = QComboBox()
+        for spec in SPECS.values():
+            self.provider_chooser.addItem(spec.label, spec.id)
+        layout.addWidget(labelled("Provider", self.provider_chooser))
         layout.addWidget(
             hint(
-                "Keys are shared between a source checkout and the installed app, so you only "
-                "enter them once. " + secrets.describe_store()
+                "Keys are shared between a source checkout and the installed app, so you "
+                "only enter them once. " + secrets.describe_store()
+            )
+        )
+        layout.addWidget(
+            hint(
+                "This chooses which provider to set up. Which one yada actually uses is on "
+                "the Transcribe and Transform tabs, so you can keep more than one key."
             )
         )
 
+        self._provider_pages = QStackedWidget()
         for spec in SPECS.values():
-            box = QGroupBox(spec.label)
-            form = QFormLayout(box)
-
-            field = QLineEdit()
-            field.setPlaceholderText("Paste your API key — it saves itself")
-            # textEdited, not textChanged: it fires only for user input, so loading a
-            # stored key into the field cannot be mistaken for entering a new one and
-            # saved back over the real value.
-            field.textEdited.connect(lambda _t, pid=spec.id: self._on_key_edited(pid))
-            self._key_fields[spec.id] = field
-
-            clear = QPushButton("Clear")
-            clear.clicked.connect(lambda _=False, pid=spec.id: self._clear_key(pid))
-            test = QPushButton("Test")
-            test.setToolTip("Ask the provider for its model list using this key.")
-            test.clicked.connect(
-                lambda _=False, pid=spec.id: self.test_provider_requested.emit(pid)
-            )
-
-            row = QHBoxLayout()
-            row.addWidget(field, 1)
-            row.addWidget(test)
-            row.addWidget(clear)
-            holder = QWidget()
-            holder.setLayout(row)
-
-            # HintLabel rather than a hand-styled QLabel: the previous
-            # "color: palette(mid); font-size: 11px" was unreadable on a dark theme, which
-            # is what made "No key set." impossible to see.
-            # A label of its own, used only by Test. It previously shared the key-status
-            # label, so a result appeared for a moment and was then overwritten by a
-            # refresh -- a flicker with no way to read what it said.
-            test_status = hint("")
-            self._key_test_status[spec.id] = test_status
-
-            form.addRow(holder)
-            form.addRow(test_status)
-            capability = []
-            if spec.transcribes:
-                capability.append("transcription")
-            if spec.transforms:
-                capability.append("transform")
-            form.addRow(hint(f"{spec.notes} Used for: {', '.join(capability)}."))
-            if spec.env_var:
-                form.addRow(
-                    hint(f"{spec.env_var} in the environment overrides whatever is stored here.")
-                )
-            layout.addWidget(box)
+            self._provider_pages.addWidget(self._build_provider_page(spec))
+        self.provider_chooser.currentIndexChanged.connect(
+            self._provider_pages.setCurrentIndex
+        )
+        layout.addWidget(self._provider_pages)
 
         planned = QGroupBox("Not yet available")
         planned_layout = QVBoxLayout(planned)
@@ -264,12 +255,73 @@ class SettingsWindow(QWidget):
             hint(
                 "yada's provider layer is designed for these; each is one file plus a registry "
                 "entry, with no changes to the recording pipeline:\n"
-                + "\n".join(f"    • {name} — {what}" for name, what in PLANNED.items())
+                + "\n".join(f"    \u2022 {name} \u2014 {what}" for name, what in PLANNED.items())
             )
         )
         layout.addWidget(planned)
         layout.addStretch(1)
         return page
+
+    def _build_provider_page(self, spec) -> QWidget:
+        """The key field and everything else specific to one provider."""
+        box = QGroupBox(spec.label)
+        form = QFormLayout(box)
+
+        field = QLineEdit()
+        field.setPlaceholderText("Paste your API key — it saves itself")
+        # textEdited, not textChanged: it fires only for user input, so loading a stored
+        # key into the field cannot be mistaken for entering a new one and saved back over
+        # the real value.
+        field.textEdited.connect(lambda _t, pid=spec.id: self._on_key_edited(pid))
+        self._key_fields[spec.id] = field
+
+        clear = QPushButton("Clear")
+        clear.clicked.connect(lambda _=False, pid=spec.id: self._clear_key(pid))
+        test = QPushButton("Test")
+        test.setToolTip("Ask the provider for its model list using this key.")
+        test.clicked.connect(lambda _=False, pid=spec.id: self.test_provider_requested.emit(pid))
+
+        row = QHBoxLayout()
+        row.addWidget(field, 1)
+        row.addWidget(test)
+        row.addWidget(clear)
+        holder = QWidget()
+        holder.setLayout(row)
+
+        # A label of its own, used only by Test. It previously shared the key-status label,
+        # so a result appeared for a moment and was then overwritten by a refresh -- a
+        # flicker with no way to read what it said.
+        test_status = hint("")
+        # Hidden until there is something to say, so an unused row does not sit as a gap
+        # between the key field and the provider's notes.
+        test_status.hide()
+        self._key_test_status[spec.id] = test_status
+
+        form.addRow(holder)
+        form.addRow(test_status)
+
+        capability = []
+        if spec.transcribes:
+            capability.append("transcription")
+        if spec.transforms:
+            capability.append("transform")
+        form.addRow(hint(f"{spec.notes} Used for: {', '.join(capability)}."))
+
+        if picks := _recommendation_lines(spec):
+            form.addRow(hint("Recommended here:\n" + "\n".join(picks)))
+        if spec.env_var:
+            form.addRow(
+                hint(f"{spec.env_var} in the environment overrides whatever is stored here.")
+            )
+
+        holder_page = QWidget()
+        page_layout = QVBoxLayout(holder_page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(box)
+        # Otherwise the single child is given the whole page and the group box stretches,
+        # leaving a large empty panel under the last line of text.
+        page_layout.addStretch(1)
+        return holder_page
 
     def _on_key_edited(self, provider_id: str) -> None:
         """The user typed or pasted. Clear the masked display and debounce a save."""
@@ -309,6 +361,7 @@ class SettingsWindow(QWidget):
         secrets.set_key(provider_id, field.text())
         if label := self._key_test_status.get(provider_id):
             label.setText("")  # a result for the previous key means nothing now
+            label.hide()
         self.key_changed.emit(provider_id)
 
     def flush_pending_keys(self) -> None:
@@ -345,6 +398,7 @@ class SettingsWindow(QWidget):
     def set_provider_test_result(self, provider_id: str, message: str) -> None:
         if label := self._key_test_status.get(provider_id):
             label.setText(message)
+            label.setVisible(bool(message))
 
     # ==================================================================================
     # Transcription
@@ -903,6 +957,8 @@ class SettingsWindow(QWidget):
         self.update_enabled.setChecked(s.updates_enabled)
         self.current_version_label.setText(_running_version())
         self._select(self.paste_mode, s.output.paste_mode)
+        self.stt_model.set_current(s.transcription.model)
+        self.tf_model.set_current(s.transform.model)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
         self.show_notifications.setChecked(s.output.show_notifications)
         self.chime_listening.set_enabled_state(s.output.chime_on_listening)
@@ -1009,6 +1065,10 @@ class SettingsWindow(QWidget):
                 continue
             # API key fields have their own debounce and do not live in settings.json.
             if child in self._key_fields.values():
+                continue
+            # The provider chooser picks which panel is on screen. It is navigation, not a
+            # setting, and saving on it would write a file for a click that changed nothing.
+            if child is getattr(self, "provider_chooser", None):
                 continue
             if isinstance(child, ChimeRow | VolumeRow | StringListEditor | ModelPicker):
                 child.changed.connect(self._schedule_save)

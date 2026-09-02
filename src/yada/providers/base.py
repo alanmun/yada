@@ -11,7 +11,7 @@ than on provider identity, so adding a provider never means touching the pipelin
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -373,3 +373,22 @@ class ProviderSpec:
     # Free-text model entry is always permitted; discovery ranks and suggests, never gates.
     notes: str = ""
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    # A curated pick per modality, most preferred first. The first entry that discovery
+    # actually returns is shown as the recommendation, so a retired model falls through to
+    # the next rather than recommending something nobody can select. Empty means the
+    # provider's catalogue is too large or too fluid to curate honestly.
+    recommended_transcription: tuple[str, ...] = field(default_factory=tuple)
+    recommended_transform: tuple[str, ...] = field(default_factory=tuple)
+
+    def recommended(self, modality: Modality, available: Iterable[str]) -> str:
+        """The best curated pick this provider actually offers right now."""
+        offered = set(available)
+        candidates = (
+            self.recommended_transcription
+            if modality is Modality.TRANSCRIPTION
+            else self.recommended_transform
+        )
+        for candidate in candidates:
+            if candidate in offered:
+                return candidate
+        return ""

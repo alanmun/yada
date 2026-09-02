@@ -24,6 +24,16 @@ SPECS: dict[str, ProviderSpec] = {
             "Realtime streaming transcription with native keyword hints, plus GPT-5.6 "
             "for transforms. The only provider here that streams while you speak."
         ),
+        # Benchmarked against the live API with TTS-generated speech and a known sentence:
+        # gpt-live-transcribe is the only transcription model that accepts *both* keywords
+        # and delay, reaches 0% word error rate with vocabulary terms supplied, produces a
+        # first partial ~0.5s into speech and finalises ~0.7s after you stop.
+        # gpt-transcribe is the fallback: equally accurate, no streaming deltas, and it
+        # refuses `delay`.
+        recommended_transcription=("gpt-live-transcribe", "gpt-transcribe", "gpt-4o-transcribe"),
+        # Luna is the efficient tier of the 5.6 family, which is the right shape for a
+        # short cleanup pass; Terra is the step up when the pass needs more judgement.
+        recommended_transform=("gpt-5.6-luna", "gpt-5.6-terra"),
     ),
     "openrouter": ProviderSpec(
         id="openrouter",
@@ -35,6 +45,20 @@ SPECS: dict[str, ProviderSpec] = {
         notes=(
             "One key for many models. Batch transcription only -- no realtime socket, so "
             "transcription starts when you stop recording."
+        ),
+        # OpenRouter lists 19 transcription models and several hundred text ones, so these
+        # are picked from its public catalogue rather than measured end to end. gpt-transcribe
+        # is the same model measured at 0% word error rate on OpenAI's own API, which makes
+        # it the pick that is actually backed by evidence; the rest are ordered fallbacks.
+        recommended_transcription=(
+            "openai/gpt-transcribe",
+            "openai/gpt-4o-transcribe",
+            "openai/whisper-large-v3-turbo",
+        ),
+        recommended_transform=(
+            "openai/gpt-5.6-luna",
+            "google/gemini-3.8-flash",
+            "anthropic/claude-haiku-4.5",
         ),
     ),
 }

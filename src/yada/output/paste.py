@@ -51,6 +51,77 @@ class PasteBackend(Protocol):
         ...
 
 
+def _win32_input():
+    """Bind SendInput with the *complete* INPUT structure.
+
+    The size of INPUT is set by its largest union member, MOUSEINPUT -- and the union here
+    used to contain only KEYBDINPUT. That made the structure 32 bytes where Windows requires
+    40, and `cbSize` not matching is a documented hard failure: SendInput returned 0 with
+    ERROR_INVALID_PARAMETER and injected nothing. Auto-paste never worked on Windows, on any
+    release, and said "error 0" while failing because `ctypes.windll` does not set
+    `use_last_error`.
+
+    So: every union member is declared, `dwExtraInfo` is ULONG_PTR rather than a pointer
+    type, and the DLL is bound with `use_last_error=True`. `tests/test_paste.py` asserts the
+    size, because nothing else about the failure is visible.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    ULONG_PTR = wintypes.WPARAM
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ULONG_PTR),
+        ]
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ULONG_PTR),
+        ]
+
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [
+            ("uMsg", wintypes.DWORD),
+            ("wParamL", wintypes.WORD),
+            ("wParamH", wintypes.WORD),
+        ]
+
+    class INPUT(ctypes.Structure):
+        class _U(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+
+        _anonymous_ = ("u",)
+        _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_KEYUP = 0x0002
+
+    def keyboard_event(vk: int, *, up: bool) -> INPUT:
+        event = INPUT()
+        event.type = INPUT_KEYBOARD
+        event.ki.wVk = vk
+        event.ki.wScan = 0
+        event.ki.dwFlags = KEYEVENTF_KEYUP if up else 0
+        event.ki.time = 0
+        event.ki.dwExtraInfo = 0
+        return event
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.SendInput.argtypes = (wintypes.UINT, ctypes.c_void_p, ctypes.c_int)
+    user32.SendInput.restype = wintypes.UINT
+    return user32, INPUT, keyboard_event
+
+
 class Win32PasteBackend:
     name = "win32"
 
@@ -60,48 +131,26 @@ class Win32PasteBackend:
 
     def paste(self) -> tuple[bool, str | None]:
         import ctypes
-        from ctypes import wintypes
 
-        # SendInput requires the full INPUT structure; there is no simpler supported call.
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [
-                ("wVk", wintypes.WORD),
-                ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-            ]
-
-        class INPUT(ctypes.Structure):
-            class _U(ctypes.Union):
-                _fields_ = [("ki", KEYBDINPUT)]
-
-            _anonymous_ = ("u",)
-            _fields_ = [("type", wintypes.DWORD), ("u", _U)]
-
-        INPUT_KEYBOARD = 1
-        KEYEVENTF_KEYUP = 0x0002
+        user32, INPUT, keyboard_event = _win32_input()
         VK_CONTROL, VK_V = 0x11, 0x56
-
-        def event(vk: int, up: bool) -> INPUT:
-            inp = INPUT()
-            inp.type = INPUT_KEYBOARD
-            inp.ki = KEYBDINPUT(
-                wVk=vk, wScan=0, dwFlags=KEYEVENTF_KEYUP if up else 0, time=0, dwExtraInfo=None
-            )
-            return inp
-
         sequence = (INPUT * 4)(
-            event(VK_CONTROL, False),
-            event(VK_V, False),
-            event(VK_V, True),
-            event(VK_CONTROL, True),
+            keyboard_event(VK_CONTROL, up=False),
+            keyboard_event(VK_V, up=False),
+            keyboard_event(VK_V, up=True),
+            keyboard_event(VK_CONTROL, up=True),
         )
-        sent = ctypes.windll.user32.SendInput(4, sequence, ctypes.sizeof(INPUT))
+        ctypes.set_last_error(0)
+        sent = user32.SendInput(4, ctypes.byref(sequence), ctypes.sizeof(INPUT))
         if sent != 4:
             code = ctypes.get_last_error()
-            # The usual cause is UIPI: a normal-privilege app cannot inject into an
-            # elevated window. Worth saying so plainly rather than reporting a raw code.
+            if code == 87:  # ERROR_INVALID_PARAMETER
+                return False, (
+                    "SendInput rejected the input structure (error 87). This is a bug in "
+                    "yada, not a problem with your system."
+                )
+            # Otherwise the usual cause is UIPI: a normal-privilege app cannot inject into
+            # an elevated window. Worth saying so plainly rather than a raw code.
             return False, (
                 f"SendInput was blocked (error {code}). The focused window may be running "
                 "as administrator, which blocks input from non-elevated apps."

@@ -77,6 +77,14 @@ success. A handshake proves nothing about a session — the model and every fiel
 `session.update` are validated afterwards — and a refusal has to be a *connection* failure
 for anything above it to fall back.
 
+**SendInput needs the whole INPUT structure.** Its size is set by the union's largest
+member, MOUSEINPUT, and the union here declared only KEYBDINPUT — 32 bytes where Windows
+requires 40. `cbSize` not matching is a documented hard failure, so SendInput returned 0
+with ERROR_INVALID_PARAMETER and injected nothing: auto-paste never worked on Windows, on
+any release, and reported "error 0" while failing because `ctypes.windll` does not set
+`use_last_error`. Both are fixed, and `tests/test_paste.py` asserts the size, because
+nothing else about that failure is visible.
+
 **Optional session fields are model-dependent, and a refusal is fatal to the session.**
 Measured against the live API: `gpt-transcribe`, `gpt-4o-transcribe` and
 `gpt-4o-mini-transcribe` refuse `delay`; `gpt-realtime-whisper` and the `gpt-4o-*` pair
@@ -139,6 +147,37 @@ Anti-drift falls out of this. `resolve_model()` warns when a pinned model has va
 from a freshly discovered list and names the highest-ranked replacement, and it
 deliberately stays quiet when discovery merely failed — an empty list while offline proves
 nothing about whether a model still exists.
+
+### A curated pick per provider
+
+`ProviderSpec` carries an ordered `recommended_transcription` / `recommended_transform`, and
+the first entry discovery actually returns is what gets marked — so a retired model falls
+through to the next rather than recommending something nobody can select, and a provider
+with nothing curated recommends nothing rather than inventing a pick.
+
+The recommendation is *marked in place*, never reordered. Newest-first is what makes a new
+release visible at all, which is the entire point of live discovery; sorting the curated
+pick to the top would hide exactly the thing the ordering exists to surface. It is used as
+the starting selection only when nothing is configured yet.
+
+For OpenAI the picks are measured (see the benchmark note under Transcription). OpenRouter
+lists 19 transcription models and several hundred text ones, so its picks come from its
+public catalogue rather than end-to-end measurement — with `openai/gpt-transcribe` first
+because that is the one model in the list yada has actually benchmarked.
+
+### The settings window must never report a model the user did not choose
+
+Discovery arrives after the window opens. In between the combo is empty, and an empty combo
+used to report `""` from `current_model()` — so the autosave that follows any edit wrote
+that emptiness into settings, and the next refresh selected whatever sorted first. A
+configured transform model came back as an unrelated realtime model that way. Two rules
+follow, both tested:
+
+* `ModelPicker` remembers the configured value independently of its list, and reports it
+  whenever the list is empty.
+* `show_settings` shows the window *before* pushing state into it, because
+  `_push_status_to_settings` skips a window that is not visible — which is why the pickers
+  were empty on first open and looked like "click Refresh".
 
 ## Capability support is tri-state, not boolean
 

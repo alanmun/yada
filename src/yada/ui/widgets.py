@@ -150,6 +150,10 @@ class ModelPicker(QWidget):
     def __init__(self, *, allow_auto: bool = True, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._allow_auto = allow_auto
+        # What settings say, remembered independently of the list. Discovery arrives after
+        # the window opens, and without this the combo is empty in between -- so the
+        # autosave that follows any edit wrote that emptiness back over the user's model.
+        self._configured = ""
 
         self.combo = QComboBox()
         self.combo.setEditable(True)  # free text always permitted
@@ -182,7 +186,28 @@ class ModelPicker(QWidget):
 
     AUTO_LABEL = "Automatic (newest available)"
 
-    def set_models(self, models: Iterable[ModelInfo], *, current: str) -> None:
+    def set_current(self, model: str) -> None:
+        """Show the configured model before discovery has produced anything to choose from.
+
+        Called on load. The list arrives later, so until it does the combo would otherwise
+        be empty and `current_model()` would report nothing -- which is how a configured
+        transform model was silently replaced by whatever ended up first in the list.
+        """
+        self._configured = model or ""
+        self.combo.blockSignals(True)
+        if model and self.combo.findData(model) < 0:
+            self.combo.addItem(model, model)
+        index = self.combo.findData(model)
+        if index >= 0:
+            self.combo.setCurrentIndex(index)
+        elif self._allow_auto:
+            self.combo.setCurrentIndex(0)
+        self.combo.blockSignals(False)
+
+    def set_models(
+        self, models: Iterable[ModelInfo], *, current: str, recommended: str = ""
+    ) -> None:
+        self._configured = current or self._configured
         self.combo.blockSignals(True)
         self.combo.clear()
         if self._allow_auto:
@@ -191,16 +216,29 @@ class ModelPicker(QWidget):
             label = m.display
             if m.input_cost_per_mtok is not None:
                 label += f"   (${m.input_cost_per_mtok:.2f}/M in)"
+            if m.id == recommended:
+                # Marked rather than reordered: the list stays newest-first, which is what
+                # makes a new release visible, and the curated pick is still findable.
+                label += "   ★ recommended"
             self.combo.addItem(label, m.id)
         # A pinned model that discovery did not return is still selectable -- it may be new,
         # or discovery may have failed.
         if current and self.combo.findData(current) < 0:
             self.combo.addItem(f"{current}   (not in the discovered list)", current)
         index = self.combo.findData(current)
+        if index < 0 and recommended:
+            # Nothing chosen yet: start on the curated pick rather than on whatever
+            # happens to sort first, which is how a picker with no "automatic" entry
+            # silently selected the newest unrelated model.
+            index = self.combo.findData(recommended)
         self.combo.setCurrentIndex(index if index >= 0 else 0)
         self.combo.blockSignals(False)
 
     def current_model(self) -> str:
+        if self.combo.count() == 0:
+            # Nothing to choose from yet. Reporting "" here is what let an autosave
+            # overwrite a perfectly good setting with nothing.
+            return self._configured
         data = self.combo.currentData()
         if data is not None:
             return str(data)
