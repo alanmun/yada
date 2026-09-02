@@ -36,7 +36,10 @@ export XDG_CONFIG_HOME="$WORK/home/.config"
 export XDG_CACHE_HOME="$WORK/home/.cache"
 mkdir -p "$HOME"
 
-export YADA_INSTALLER_NO_PAUSE=1  # the installer must never block on input here
+# Where the payload lives. A frozen build works this out from sys.executable, which is
+# what happens in CI; setting it explicitly also lets this script drive a non-frozen build
+# during development, and resolves to the same directory either way.
+export YADA_PAYLOAD_DIR="$(cd "$PAYLOAD" && pwd)"
 
 pass() { echo "  ok   $1"; }
 fail() { echo "  FAIL $1" >&2; exit 1; }
@@ -96,8 +99,11 @@ case "$doctor" in
 esac
 pass "doctor ran cleanly (exit $doctor_rc)"
 
-echo "=== 3. the double-click installer works ==="
-( cd "$PAYLOAD" && run_logged 120 "$WORK/install.log" "./INSTALL$EXE" )
+echo "=== 3. the application installs itself ==="
+# No separate installer binary is shipped: the one-file INSTALL.exe was quarantined by
+# Defender as Trojan:Win32/Bearfoos.A!ml, and because it travelled inside the update
+# archive the real-time scan also disrupted the updater mid-extraction.
+( cd "$PAYLOAD" && run_logged 180 "$WORK/install.log" "./yada$EXE" install )
 [ -f "$YADA_INSTALL_ROOT/current" ] || fail "no current pointer was written"
 [ -f "$YADA_INSTALL_ROOT/versions/$VERSION/.complete" ] || fail "version was not marked complete"
 VERSION_EXE="$YADA_INSTALL_ROOT/versions/$VERSION/yada$EXE"
@@ -136,6 +142,37 @@ for _ in $(seq 1 40); do
   if ! "$VERSION_EXE" status >/dev/null 2>&1; then stopped=1; break; fi
   sleep 0.5
 done
+# Checking the socket alone is not enough: an instance was found that had released its
+# socket and then stayed resident for over an hour, holding the microphone and its own
+# files. The process itself must be gone.
+# Matched on the exact process name, never with pgrep -f. A full-commandline match also
+# matches this very script -- its own path contains "yada" -- so the check would report
+# the app as resident forever and fail every release.
+yada_running() {
+  if command -v tasklist >/dev/null 2>&1; then
+    tasklist //FI "IMAGENAME eq yada.exe" 2>/dev/null | grep -qi "yada.exe"
+  else
+    pgrep -x yada >/dev/null 2>&1
+  fi
+}
+
+gone=0
+for _ in $(seq 1 20); do
+  yada_running || { gone=1; break; }
+  sleep 0.5
+done
+if [ "$gone" != "1" ]; then
+  echo "     the socket closed but the process is still resident"
+  show_app_log
+  if command -v tasklist >/dev/null 2>&1; then
+    tasklist //FI "IMAGENAME eq yada.exe" 2>/dev/null | sed 's/^/     /' || true
+  else
+    pgrep -ax yada 2>/dev/null | sed 's/^/     /' || true
+  fi
+  fail "app did not exit"
+fi
+pass "process exited"
+
 if [ "$stopped" != "1" ]; then
   echo "     still answering status 20s after stop"
   show_app_log

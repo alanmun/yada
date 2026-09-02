@@ -67,9 +67,6 @@ jobs:
       - name: Build the application
         run: uv run pyinstaller --noconfirm --clean packaging/yada.spec
 
-      - name: Build the double-click installer
-        run: uv run pyinstaller --noconfirm --clean packaging/installer.spec
-
       - name: Assemble the payload
         shell: bash
         env:
@@ -82,14 +79,13 @@ jobs:
           # install root was quarantined by Defender as Trojan:Win32/Bearfoos.A!ml, an ML
           # heuristic that fires readily on self-extracting executables. Shortcuts now
           # point at a version's own one-dir executable, which was never flagged.
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp dist/INSTALL.exe dist/yada/INSTALL.exe
-            cp packaging/install.ps1 dist/yada/install.ps1
-          else
-            cp dist/INSTALL dist/yada/INSTALL
-            chmod +x dist/yada/yada dist/yada/INSTALL
-            cp packaging/install.sh dist/yada/install.sh
-            chmod +x dist/yada/install.sh
+          # No installer binary is shipped either. INSTALL.exe was a one-file
+          # PyInstaller build and Defender deleted it out of the extracted archive as
+          # Trojan:Win32/Bearfoos.A!ml -- and because it travelled inside the update
+          # archive, the real-time scan also disrupted the updater mid-extraction. The
+          # application installs itself; see src/yada/selfinstall.py.
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            chmod +x dist/yada/yada
           fi
           # Tells a human which file to open; the rest of the folder is the runtime.
           cp packaging/README-release.txt dist/yada/README.txt

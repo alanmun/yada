@@ -554,25 +554,65 @@ class YadaApp(QObject):
         self._shutdown(relaunch=True)
 
     def _shutdown(self, *, relaunch: bool) -> None:
-        asyncio.run_coroutine_threadsafe(self.session.shutdown(), self.loop)
+        """Shut down, and guarantee the process actually ends.
+
+        Every step is individually suppressed. Previously one failure between releasing
+        the command socket and calling app.quit() left the app resident: no tray icon, no
+        socket, unreachable and unstoppable, still holding the microphone -- and on Windows
+        still holding its own files, which is what makes a reinstall fail. A process found
+        in that state had been up for over an hour.
+
+        The watchdog is the belt to that braces. If the Qt event loop has not ended
+        shortly after being asked to, the process exits anyway. os._exit skips interpreter
+        cleanup, which is exactly what is wanted here: the app's own cleanup has already
+        run above, and lingering is worse than an abrupt exit.
+        """
+        with contextlib.suppress(Exception):
+            asyncio.run_coroutine_threadsafe(self.session.shutdown(), self.loop)
         if self._hotkey is not None:
             with contextlib.suppress(Exception):
                 self._hotkey.stop()
         if self._updates is not None:
-            asyncio.run_coroutine_threadsafe(self._updates.stop(), self.loop)
+            with contextlib.suppress(Exception):
+                asyncio.run_coroutine_threadsafe(self._updates.stop(), self.loop)
 
         # Order matters. The replacement instance checks whether one is already running,
         # so the socket must be closed before it starts -- otherwise it finds us, treats
         # itself as a second copy, forwards a command and exits, leaving nothing running.
         if self._ipc is not None:
-            self._ipc.stop()
+            with contextlib.suppress(Exception):
+                self._ipc.stop()
             self._ipc = None
 
-        self.tray.hide()
+        with contextlib.suppress(Exception):
+            self.tray.hide()
         if relaunch:
-            self._spawn_replacement()
-        self.async_thread.stop()
-        self.app.quit()
+            with contextlib.suppress(Exception):
+                self._spawn_replacement()
+        with contextlib.suppress(Exception):
+            self.async_thread.stop()
+
+        self._arm_exit_watchdog()
+        with contextlib.suppress(Exception):
+            self.app.quit()
+
+    def _arm_exit_watchdog(self, *, grace_ms: int = 2500) -> None:
+        """Force the process to end if the event loop refuses to.
+
+        Runs on a plain daemon thread rather than a QTimer: if Qt is the thing that is
+        stuck, a Qt timer will never fire.
+        """
+        import os as _os
+        import threading as _threading
+
+        def bail() -> None:
+            import time
+
+            time.sleep(grace_ms / 1000)
+            # Still here means app.exec() did not return. Nothing left to save.
+            _os._exit(0)
+
+        _threading.Thread(target=bail, name="yada-exit-watchdog", daemon=True).start()
 
     def _spawn_replacement(self) -> None:
         """Start a detached copy of ourselves, surviving this process's exit."""

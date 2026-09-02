@@ -91,6 +91,8 @@ Usage:
   yada stop            Quit the running instance
   yada status          Report whether yada is running
   yada doctor          Check whether this machine can run yada, and what is missing
+  yada install         Install into your user profile and start (also happens on
+                       first run from an extracted archive)
   yada --version       Print the version
   yada --help          Show this message
 
@@ -152,6 +154,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
 
+    if command in ("install", "--install"):
+        return _install()
+
     if command == "doctor":
         # Deliberately ahead of the IPC checks: doctor must work whether or not yada is
         # running, and it is the first thing to reach for when it will not start.
@@ -179,7 +184,42 @@ def main(argv: list[str] | None = None) -> int:
     return _run_app()
 
 
+def _install() -> int:
+    """Install this payload and start the installed copy."""
+    from .selfinstall import install_and_relaunch
+
+    ok, message = install_and_relaunch()
+    print(message)
+    _notify(message, error=not ok)
+    return 0 if ok else 1
+
+
+def _notify(message: str, *, error: bool = False) -> None:
+    """Show a message box on Windows, where there may be no console to print to.
+
+    yada.exe is built for the GUI subsystem, so a double-click from Explorer has nowhere
+    to write. Without this, installing by double-clicking would appear to do nothing.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        icon = 0x10 if error else 0x40  # MB_ICONERROR / MB_ICONINFORMATION
+        ctypes.windll.user32.MessageBoxW(None, message, "yada", icon)
+    except Exception:  # noqa: BLE001 - a missing dialog must not mask the outcome
+        pass
+
+
 def _run_app(*, start_recording: bool = False, args: list[str] | None = None) -> int:
+    # Running from an extracted archive rather than a managed install means yada has not
+    # been installed yet. Double-clicking yada.exe there should install it, which is why
+    # there is no separate installer binary -- the last one was quarantined by Defender.
+    from .selfinstall import is_managed_install
+
+    if not is_managed_install() and getattr(sys, "frozen", False):
+        return _install()
+
     # Applying an update is just launching the newer version, so this is checked before
     # anything expensive is imported. Replaces the separate launcher binary that Windows
     # Defender quarantined; see relaunch.py.
