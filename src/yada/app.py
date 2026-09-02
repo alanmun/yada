@@ -101,6 +101,10 @@ class EventBridge(QObject):
     # event loop, so the callback would never run.
     open_settings_requested = Signal()
     quit_requested = Signal()
+    # Results of a provider key test. Must be a signal: the test runs on the asyncio
+    # thread, and touching a QLabel from there is undefined -- in practice the update was
+    # simply discarded, so pressing Test appeared to do nothing at all.
+    provider_test_result = Signal(str, str)
 
     def on_state(self, state: SessionState) -> None:
         self.state.emit(state)
@@ -338,6 +342,9 @@ class YadaApp(QObject):
             self.show_settings, Qt.ConnectionType.QueuedConnection
         )
         self.bridge.quit_requested.connect(self.quit, Qt.ConnectionType.QueuedConnection)
+        self.bridge.provider_test_result.connect(
+            self._on_provider_test_result, Qt.ConnectionType.QueuedConnection
+        )
 
     def _start_ipc(self) -> bool:
         def handler(command: str, _payload: dict) -> dict:
@@ -488,7 +495,7 @@ class YadaApp(QObject):
             window = SettingsWindow(self.settings)
             window.saved.connect(self._on_settings_saved)
             window.refresh_models_requested.connect(self.refresh_models)
-            window.key_changed.connect(lambda _pid: self.refresh_models("transcription"))
+            window.key_changed.connect(self._on_key_changed)
             window.test_provider_requested.connect(self._test_provider)
             window.check_updates_requested.connect(self.check_updates)
             window.preview_sound_requested.connect(self._preview_sound)
@@ -497,6 +504,7 @@ class YadaApp(QObject):
         else:
             self.settings_window.load(self.settings)
         self._push_status_to_settings()
+        self._refresh_stale_models()
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
@@ -508,6 +516,31 @@ class YadaApp(QObject):
 
     def refresh_models(self, kind: str) -> None:
         asyncio.run_coroutine_threadsafe(self._refresh_models(kind), self.loop)
+
+    def _on_key_changed(self, _provider_id: str) -> None:
+        """A key was entered or cleared: that is the moment discovery becomes possible.
+
+        Both kinds, because one key usually unlocks both transcription and transform for
+        the same provider.
+        """
+        self.refresh_models("transcription")
+        self.refresh_models("transform")
+
+    def _refresh_stale_models(self) -> None:
+        """Fetch anything the cache does not already have, when settings opens.
+
+        The point of the model list is that it is never hand-maintained, so it should not
+        need a button press either. Cached entries appear instantly; a stale or empty one
+        is fetched in the background and the picker updates when it lands.
+        """
+        ttl = self.settings.model_cache_ttl_hours
+        for kind, provider_id in (
+            ("transcription", self.settings.transcription.provider),
+            ("transform", self.settings.transform.provider),
+        ):
+            entry = self.catalog.entry(provider_id)
+            if not entry.models or self.catalog.is_stale(provider_id, ttl):
+                self.refresh_models(kind)
 
     def quit(self) -> None:
         self._shutdown(relaunch=False)
@@ -589,6 +622,8 @@ class YadaApp(QObject):
             provider = built[0] if built else None
 
         if provider is None:
+            # Almost always a missing key. Previously this returned silently, so Refresh
+            # appeared to do nothing at all.
             self.bridge.catalog_changed.emit()
             return
         await self.catalog.refresh(provider_id, provider, modality=modality)
@@ -701,7 +736,7 @@ class YadaApp(QObject):
             stt_entry.for_modality(Modality.TRANSCRIPTION),
             current=self.settings.transcription.model,
         )
-        window.stt_model.set_status(stt_entry.staleness_note())
+        window.stt_model.set_status(self._model_status(stt_id, stt_entry))
         _, drift = self.catalog.resolve_model(
             stt_id, self.settings.transcription.model, Modality.TRANSCRIPTION
         )
@@ -712,7 +747,7 @@ class YadaApp(QObject):
         window.tf_model.set_models(
             tf_entry.for_modality(Modality.TEXT), current=self.settings.transform.model
         )
-        window.tf_model.set_status(tf_entry.staleness_note())
+        window.tf_model.set_status(self._model_status(tf_id, tf_entry))
 
         built = self._build_transformer()
         if built is not None:
@@ -735,6 +770,24 @@ class YadaApp(QObject):
             window.set_update_ready(self._updates.status.ready_version)
         window.refresh_key_status()
 
+    def _model_status(self, provider_id: str, entry) -> str:
+        """What to say under a model picker.
+
+        A missing key is the overwhelmingly common reason for an empty list, and saying
+        "not discovered yet" for it is useless -- it reads as a broken Refresh button
+        rather than as a missing prerequisite.
+        """
+        spec = SPECS.get(provider_id)
+        label = spec.label if spec else provider_id
+        if not self._key_for(provider_id):
+            return (
+                f"Add your {label} key on the Providers tab — the model list then loads "
+                "by itself."
+            )
+        if not entry.models and not entry.last_error:
+            return f"Loading the {label} model list…"
+        return entry.staleness_note()
+
     def _on_settings_saved(self, new_settings: Settings) -> None:
         old = self.settings
         self.settings = new_settings
@@ -750,8 +803,11 @@ class YadaApp(QObject):
             self._start_hotkey()
 
         self._configure_chimes()
-        if new_settings.theme != old.theme:
-            apply_theme(self.app, new_settings.theme)
+        if (
+            new_settings.theme != old.theme
+            or new_settings.text_scale != old.text_scale
+        ):
+            apply_theme(self.app, new_settings.theme, new_settings.text_scale)
         if new_settings.start_on_login != old.start_on_login:
             self._sync_desktop_integration()
         self._tidy_install()
@@ -762,30 +818,50 @@ class YadaApp(QObject):
             self.refresh_models("transform")
         self._push_status_to_settings()
 
+    def _on_provider_test_result(self, provider_id: str, message: str) -> None:
+        if self.settings_window is not None:
+            self.settings_window.set_provider_test_result(provider_id, message)
+
     def _test_provider(self, provider_id: str) -> None:
+        # Keys are debounced, so a key pasted a moment ago may not be stored yet. Write it
+        # first, or Test would report "no key set" for a key plainly visible in the field.
+        if self.settings_window is not None:
+            self.settings_window.flush_pending_keys()
+            self.settings_window.set_provider_test_result(provider_id, "Testing…")
         asyncio.run_coroutine_threadsafe(self._do_test_provider(provider_id), self.loop)
 
     async def _do_test_provider(self, provider_id: str) -> None:
+        """Ask the provider for its model list, which is the cheapest real proof of a key.
+
+        Every result goes back through a signal rather than touching the widget from here:
+        this coroutine runs on the asyncio thread.
+        """
+        report = self.bridge.provider_test_result.emit
         spec = SPECS.get(provider_id)
         key = secrets.get_key(provider_id, spec.env_var if spec else None)
-        window = self.settings_window
         if not key:
-            if window:
-                window.set_provider_test_result(provider_id, "No key set.")
+            report(provider_id, "No key set — paste one above.")
             return
+
+        counts: list[str] = []
         try:
-            provider = build_transcriber(provider_id, key) if spec and spec.transcribes else (
-                build_transformer(provider_id, key)
-            )
-            models = await provider.list_models()
-        except Exception as exc:  # noqa: BLE001 - the message is the point of the test
-            if window:
-                window.set_provider_test_result(provider_id, f"Failed: {exc}")
+            if spec and spec.transcribes:
+                stt = build_transcriber(provider_id, key)
+                counts.append(f"{len(await stt.list_models())} transcription")
+            if spec and spec.transforms:
+                tf = build_transformer(provider_id, key)
+                counts.append(f"{len(await tf.list_models())} transform")
+        except ProviderError as exc:
+            report(provider_id, f"Failed: {exc}")
             return
-        if window:
-            window.set_provider_test_result(
-                provider_id, f"Working — {len(models)} models visible with this key."
-            )
+        except Exception as exc:  # noqa: BLE001 - the message is the point of the test
+            report(provider_id, f"Failed: {type(exc).__name__}: {exc}")
+            return
+
+        report(provider_id, f"Working — {' and '.join(counts)} models visible.")
+        # A successful test has just proven discovery works, so populate the pickers.
+        self.refresh_models("transcription")
+        self.refresh_models("transform")
 
 
 async def _start_service(service: UpdateService) -> None:
@@ -810,7 +886,8 @@ def main(argv: list[str] | None = None, *, start_recording: bool = False) -> int
 
     # Before any widget exists, so nothing is built against the platform palette and then
     # recoloured. Read straight from disk: YadaApp has not loaded settings yet.
-    apply_theme(app, config.load().theme)
+    startup_settings = config.load()
+    apply_theme(app, startup_settings.theme, startup_settings.text_scale)
 
     yada = YadaApp(app)
     yada.start()

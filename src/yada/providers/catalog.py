@@ -118,7 +118,10 @@ class CatalogEntry:
         return f"Models discovered {age}."
 
     def for_modality(self, modality: Modality) -> list[ModelInfo]:
-        return [m for m in self.models if m.modality == modality]
+        """Newest first, so the most recent release is at the top of every picker."""
+        return sorted(
+            (m for m in self.models if m.modality == modality), key=lambda m: m.sort_key
+        )
 
     def support_for(self, model: str, parameter: str, fallback: Support) -> Support:
         """Probe result wins over the provider's own baseline, since it is measured."""
@@ -229,7 +232,9 @@ class ModelCatalog:
             if not auto_select_newest:
                 return "", "No model selected and auto-select is off."
             if not best:
-                return "", "No models discovered yet for this provider."
+                # Deliberately not a warning: the staleness note already says discovery
+                # has not run, and showing both said the same thing twice.
+                return "", None
             return best, None
 
         # Only warn when discovery actually succeeded; an empty list while offline proves

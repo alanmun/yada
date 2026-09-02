@@ -200,6 +200,14 @@ def ensure_tray_available() -> str | None:
         return "no Qt application"
     if QSystemTrayIcon.isSystemTrayAvailable():
         return None
+    import sys
+
+    if sys.platform == "win32":
+        # Windows always has a notification area, so this means something unusual.
+        return (
+            "Windows reported no notification area. yada still works via its shortcut, "
+            "but there will be no icon to click."
+        )
     return (
         "This desktop has no system tray. On GNOME, install the AppIndicator extension; "
         "on KDE Plasma the tray is built in. yada still works via its shortcut, but there "

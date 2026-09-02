@@ -133,6 +133,7 @@ def _parse_model(row: dict, *, transcription: bool) -> ModelInfo | None:
         output_cost_per_mtok=_to_float(pricing.get("completion")),
         supports_reasoning="reasoning" in params or None,
         supported_parameters=params,
+        created=row.get("created"),
         # No curated ranking here: OpenRouter's catalogue is thousands of models and any
         # hardcoded preference would be exactly the staleness this app avoids. Sorting is
         # left to the UI (by name, price, or context).
@@ -163,7 +164,7 @@ class OpenRouterTranscription(_OpenRouterBase):
 
     async def list_models(self) -> list[ModelInfo]:
         models = await self._fetch_models(transcription=True)
-        return sorted(models, key=lambda m: m.id)
+        return sorted(models, key=lambda m: m.sort_key)
 
     async def transcribe(self, wav_bytes: bytes, opts: TranscribeOptions) -> TranscriptionResult:
         # Base64 JSON is OpenRouter's native shape, with `format` required. The
@@ -220,7 +221,7 @@ class OpenRouterTransform(_OpenRouterBase):
 
     async def list_models(self) -> list[ModelInfo]:
         models = await self._fetch_models(transcription=False)
-        return sorted(models, key=lambda m: m.id)
+        return sorted(models, key=lambda m: m.sort_key)
 
     def capabilities(self, model: str | None = None) -> TransformCapabilities:
         """Answered from live per-model metadata where we have it.

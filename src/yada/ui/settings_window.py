@@ -13,10 +13,12 @@ behaviour Whispering gets wrong on Windows.
 from __future__ import annotations
 
 import dataclasses
+import sys
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -35,15 +37,18 @@ from PySide6.QtWidgets import (
 from .. import secrets
 from ..audio import list_input_devices
 from ..config import Settings
-from ..hotkey import toggle_command
+from ..hotkey import available_backends, toggle_command
 from ..output import create_paste_backend, sounds
 from ..pipeline.transform import DEFAULT_SYSTEM_PROMPT, default_steps
 from ..providers.base import ReasoningEffort, ServiceTier, Support
 from ..providers.registry import PLANNED, SPECS
+from .languages import label_for as language_label
+from .languages import sorted_codes
 from .sound_picker import ChimeRow, SoundLibraryEditor, VolumeRow
 from .steps_editor import StepsEditor
-from .theme import THEME_LABELS, THEMES
+from .theme import TEXT_SCALE_LABELS, TEXT_SCALES, THEME_LABELS, THEMES
 from .widgets import (
+    CheckableComboBox,
     ModelPicker,
     PromptEditor,
     StringListEditor,
@@ -59,6 +64,21 @@ PASTE_MODES = [
     ("after_transcription", "Paste as soon as the transcript is ready"),
     ("after_transformation", "Paste after the AI cleanup finishes"),
 ]
+
+
+def _running_version() -> str:
+    """What is actually running, which is not always what the source says.
+
+    An installed copy reports the version directory it was launched from; a source
+    checkout reports the package version.
+    """
+    from .. import __version__
+    from ..updater import read_current
+
+    installed = read_current()
+    if installed and installed != __version__:
+        return f"{installed}  (package {__version__})"
+    return installed or f"{__version__}  (running from source)"
 
 
 def _scrollable(inner: QWidget) -> QScrollArea:
@@ -82,15 +102,24 @@ class SettingsWindow(QWidget):
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("yada settings")
-        self.resize(760, 620)
+        # Scaled with the text, capped to the screen: at double size the tab bar overflows
+        # a fixed 760px window.
+        scale = max(1.0, min(2.0, float(getattr(settings, "text_scale", 1.0))))
+        width, height = int(720 * (0.5 + 0.6 * scale)), int(600 * (0.55 + 0.45 * scale))
+        if screen := QApplication.primaryScreen():
+            available = screen.availableGeometry()
+            width = min(width, int(available.width() * 0.9))
+            height = min(height, int(available.height() * 0.9))
+        self.resize(width, height)
         self._settings = dataclasses.replace(settings)
         self._key_fields: dict[str, QLineEdit] = {}
         self._key_status: dict[str, QLabel] = {}
+        self._key_timers: dict[str, QTimer] = {}
 
         self.tabs = QTabWidget()
         self.tabs.addTab(_scrollable(self._build_providers()), "Providers")
-        self.tabs.addTab(_scrollable(self._build_transcription()), "Transcription")
-        self.tabs.addTab(self._build_transform(), "Cleanup")
+        self.tabs.addTab(_scrollable(self._build_transcription()), "Transcribe")
+        self.tabs.addTab(self._build_transform(), "Transform")
         self.tabs.addTab(_scrollable(self._build_vocabulary()), "Vocabulary")
         self.tabs.addTab(_scrollable(self._build_shortcut()), "Shortcut")
         self.tabs.addTab(_scrollable(self._build_audio_output()), "Audio && output")
@@ -129,6 +158,27 @@ class SettingsWindow(QWidget):
 
         self.load(settings)
         self._wire_autosave()
+        self._size_to_content(settings)
+
+    def _size_to_content(self, settings: Settings) -> None:
+        """Open wide enough that the tab bar is not clipped.
+
+        Derived from what the tab bar actually asks for rather than from a multiplier: at
+        double text size the labels need roughly 1130px, and a guess that happened to work
+        at one scale clipped "Audio & output" at another. Capped to the screen, but never
+        below the minimum -- if the display genuinely cannot fit it, Qt scrolls the tab bar,
+        which beats a window larger than the desktop.
+        """
+        needed = self.tabs.tabBar().sizeHint().width() + 48
+        self.setMinimumWidth(min(needed, 1400))
+
+        scale = max(1.0, min(2.0, float(getattr(settings, "text_scale", 1.0))))
+        width, height = needed + 40, int(600 * (0.55 + 0.45 * scale))
+        if screen := QApplication.primaryScreen():
+            available = screen.availableGeometry()
+            width = min(width, int(available.width() * 0.92))
+            height = min(height, int(available.height() * 0.92))
+        self.resize(max(width, self.minimumWidth()), height)
 
     # ==================================================================================
     # Providers
@@ -150,11 +200,12 @@ class SettingsWindow(QWidget):
 
             field = QLineEdit()
             field.setEchoMode(QLineEdit.EchoMode.Password)
-            field.setPlaceholderText("Paste your API key")
+            field.setPlaceholderText("Paste your API key — it saves itself")
+            # Saved as it is entered, like every other setting. A key is pasted in one
+            # action, so a Save button was one extra click that could only be forgotten.
+            field.textChanged.connect(lambda _t, pid=spec.id: self._schedule_key_save(pid))
             self._key_fields[spec.id] = field
 
-            save = QPushButton("Save key")
-            save.clicked.connect(lambda _=False, pid=spec.id: self._save_key(pid))
             clear = QPushButton("Clear")
             clear.clicked.connect(lambda _=False, pid=spec.id: self._clear_key(pid))
             test = QPushButton("Test")
@@ -165,7 +216,6 @@ class SettingsWindow(QWidget):
 
             row = QHBoxLayout()
             row.addWidget(field, 1)
-            row.addWidget(save)
             row.addWidget(test)
             row.addWidget(clear)
             holder = QWidget()
@@ -204,14 +254,43 @@ class SettingsWindow(QWidget):
         layout.addStretch(1)
         return page
 
-    def _save_key(self, provider_id: str) -> None:
-        field = self._key_fields[provider_id]
+    def _schedule_key_save(self, provider_id: str) -> None:
+        """Debounce the write.
+
+        Separate from the settings debounce because API keys do not live in settings.json
+        at all -- they go to the OS keyring. Slightly longer, since a key is long enough
+        that a paste can arrive as more than one change event.
+        """
+        if self._loading:
+            return
+        timer = self._key_timers.get(provider_id)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(700)
+            timer.timeout.connect(lambda pid=provider_id: self._commit_key(pid))
+            self._key_timers[provider_id] = timer
+        self._key_status[provider_id].setText("Saving…")
+        timer.start()
+
+    def _commit_key(self, provider_id: str) -> None:
+        field = self._key_fields.get(provider_id)
+        if field is None:
+            return
         store = secrets.set_key(provider_id, field.text())
-        field.clear()
-        self._key_status[provider_id].setText(
-            "Key cleared." if store is secrets.Store.NONE else f"Saved to the {store}."
-        )
+        label = self._key_status[provider_id]
+        if store is secrets.Store.NONE:
+            label.setText("No key set.")
+        else:
+            key = field.text().strip()
+            label.setText(f"Saved to the {store}. Last 4: …{key[-4:]}")
         self.key_changed.emit(provider_id)
+
+    def flush_pending_keys(self) -> None:
+        for provider_id, timer in self._key_timers.items():
+            if timer.isActive():
+                timer.stop()
+                self._commit_key(provider_id)
 
     def _clear_key(self, provider_id: str) -> None:
         secrets.delete_key(provider_id)
@@ -398,40 +477,35 @@ class SettingsWindow(QWidget):
                 "Names, jargon and acronyms that get misheard. These are sent to the "
                 "transcription model as literal vocabulary hints where the provider supports "
                 "it, which fixes the spelling while it is still listening — far more effective "
-                "than correcting it afterwards. They are also added to the cleanup prompt as a "
-                "second line of defence."
+                "than correcting it afterwards. They are also added to the Transform prompt as "
+                "a second line of defence."
             )
         )
         self.vocab_terms = StringListEditor(placeholder="e.g. Troutwood")
         layout.addWidget(labelled("Terms and their correct spellings", self.vocab_terms), 1)
 
         self.vocab_context = PromptEditor(
-            "e.g. Software engineering notes and code review comments."
+            "You can explain how you typically use yada here, which might make "
+            "transcriptions even more accurate. This is optional."
         )
-        layout.addWidget(
-            labelled(
-                "What you usually dictate",
-                self.vocab_context,
-                tip=(
-                    "Free-form context, separate from the term list. Helps the model resolve "
-                    "ambiguous words in your domain."
-                ),
-            )
-        )
+        layout.addWidget(labelled("What do you usually dictate?", self.vocab_context))
 
-        self.vocab_languages = QLineEdit()
-        self.vocab_languages.setPlaceholderText("en")
+        self.vocab_languages = CheckableComboBox(empty_text="Detect automatically")
         layout.addWidget(
             labelled(
                 "Expected languages",
                 self.vocab_languages,
-                tip="Comma-separated codes. Only needed if you mix languages in one recording.",
+                tip=(
+                    "Tick any you actually speak into yada. Leave everything unticked to "
+                    "let the model detect the language itself — only worth setting if you "
+                    "mix languages in one recording."
+                ),
             )
         )
         layout.addWidget(
             hint(
                 "Tip: for a spelling a model keeps getting wrong anyway, add a Find and replace "
-                "step on the Cleanup tab. It runs locally, costs nothing and cannot be ignored."
+                "step on the Transform tab. It runs locally, costs nothing and cannot be ignored."
             )
         )
         return page
@@ -458,14 +532,17 @@ class SettingsWindow(QWidget):
         )
         layout.addWidget(self.hotkey_error)
 
+        # Only what this platform can actually use. Offering "Wayland portal" on Windows
+        # is noise, and picking it would silently fall back to something else anyway.
         self.hotkey_backend = QComboBox()
-        for value, label in [
-            ("auto", "Automatic (recommended)"),
-            ("win32", "Windows global hotkey"),
-            ("kde_portal", "Ask the desktop (Wayland portal)"),
-            ("external", "The desktop runs a command"),
-        ]:
-            self.hotkey_backend.addItem(label, value)
+        backend_labels = {
+            "win32": "Windows global hotkey",
+            "kde_portal": "Ask the desktop (Wayland portal)",
+            "external": "The desktop runs a command",
+        }
+        self.hotkey_backend.addItem("Automatic (recommended)", "auto")
+        for value in available_backends():
+            self.hotkey_backend.addItem(backend_labels.get(value, value), value)
         layout.addWidget(labelled("How to register it", self.hotkey_backend))
 
         self.hotkey_status = QLabel("")
@@ -474,16 +551,28 @@ class SettingsWindow(QWidget):
         # Status the user must be able to read and copy: left at full contrast.
         layout.addWidget(labelled("Status", self.hotkey_status))
 
-        self.copy_command = QPushButton("Copy the command to bind")
-        self.copy_command.clicked.connect(self._copy_toggle_command)
-        layout.addLayout(button_row(self.copy_command))
-        layout.addWidget(
-            hint(
-                "On Wayland, applications are not allowed to grab keys. yada asks the desktop "
-                "to own the shortcut; if that is unavailable, bind the command above in System "
-                "Settings → Shortcuts and it will reach yada just as fast."
+        # Everything below is about a restriction that only exists on Wayland. On Windows
+        # RegisterHotKey just works, so none of it is shown there.
+        if sys.platform != "win32":
+            self.copy_command = QPushButton("Copy the command to bind")
+            self.copy_command.clicked.connect(self._copy_toggle_command)
+            layout.addLayout(button_row(self.copy_command))
+            layout.addWidget(
+                hint(
+                    "On Wayland, applications are not allowed to grab keys. yada asks the "
+                    "desktop to own the shortcut; if that is unavailable, bind the command "
+                    "above in System Settings → Shortcuts and it will reach yada just as "
+                    "fast."
+                )
             )
-        )
+        else:
+            layout.addWidget(
+                hint(
+                    "Registered with Windows directly, so it works from any application. "
+                    "If another program has already claimed the combination, the status "
+                    "above will say so."
+                )
+            )
         layout.addStretch(1)
         return page
 
@@ -532,6 +621,17 @@ class SettingsWindow(QWidget):
         appearance_layout.addWidget(
             hint("Applies immediately. 'Match my desktop' uses your system light or dark theme.")
         )
+        self.text_scale = QComboBox()
+        for value in TEXT_SCALES:
+            self.text_scale.addItem(TEXT_SCALE_LABELS[value], value)
+        appearance_layout.addWidget(labelled("Text size", self.text_scale))
+        appearance_layout.addWidget(
+            hint(
+                "Scales every label, button and field together, relative to your system's "
+                "own UI font. Applies immediately."
+            )
+        )
+
         self.start_on_login = QCheckBox("Start yada when I log in")
         appearance_layout.addWidget(self.start_on_login)
         appearance_layout.addWidget(
@@ -656,6 +756,11 @@ class SettingsWindow(QWidget):
     def _build_updates(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        from . import __name__ as _  # noqa: F401  (keeps the import block tidy)
+
+        self.current_version_label = QLabel("")
+        layout.addWidget(labelled("Installed version", self.current_version_label))
+
         self.update_enabled = QCheckBox("Keep yada up to date automatically")
         layout.addWidget(self.update_enabled)
         layout.addWidget(
@@ -708,7 +813,10 @@ class SettingsWindow(QWidget):
 
         self.vocab_terms.set_values(s.vocabulary.terms)
         self.vocab_context.setPlainText(s.vocabulary.context_prompt)
-        self.vocab_languages.setText(", ".join(s.vocabulary.languages))
+        self.vocab_languages.set_options(
+            [(code, language_label(code)) for code in sorted_codes(s.vocabulary.languages)],
+            checked=s.vocabulary.languages,
+        )
 
         self.hotkey_field.setText(s.hotkey.combo)
         self._select(self.hotkey_backend, s.hotkey.backend)
@@ -719,6 +827,9 @@ class SettingsWindow(QWidget):
 
         self._select(self.theme_combo, s.theme)
         self.start_on_login.setChecked(s.start_on_login)
+        self._select(self.text_scale, s.text_scale)
+        self.update_enabled.setChecked(s.updates_enabled)
+        self.current_version_label.setText(_running_version())
         self._select(self.paste_mode, s.output.paste_mode)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
         self.chime_transcription.set_enabled_state(s.output.chime_on_transcription)
@@ -760,9 +871,9 @@ class SettingsWindow(QWidget):
 
         s.vocabulary.terms = self.vocab_terms.values()
         s.vocabulary.context_prompt = self.vocab_context.toPlainText().strip()
-        s.vocabulary.languages = [
-            code.strip() for code in self.vocab_languages.text().split(",") if code.strip()
-        ] or ["en"]
+        # An empty list is meaningful: it means "detect automatically", which providers
+        # accept. Forcing a default of English would silently override that choice.
+        s.vocabulary.languages = self.vocab_languages.checked_values()
 
         # Never persist a shortcut that does not parse; keep the last one that did.
         s.hotkey.combo = self._last_valid_combo or "ctrl+shift+;"
@@ -773,6 +884,8 @@ class SettingsWindow(QWidget):
 
         s.theme = self.theme_combo.currentData() or "blue"
         s.start_on_login = self.start_on_login.isChecked()
+        s.text_scale = float(self.text_scale.currentData() or 2.0)
+        s.updates_enabled = self.update_enabled.isChecked()
         s.output.paste_mode = self.paste_mode.currentData() or "off"
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
         s.output.chime_on_transcription = self.chime_transcription.is_enabled()
@@ -811,6 +924,9 @@ class SettingsWindow(QWidget):
             # A scroll bar is a QAbstractSlider, so without this every scroll of the
             # settings page queued a save.
             if isinstance(child, QScrollBar):
+                continue
+            # API key fields have their own debounce and do not live in settings.json.
+            if child in self._key_fields.values():
                 continue
             if isinstance(child, ChimeRow | VolumeRow | StringListEditor | ModelPicker):
                 child.changed.connect(self._schedule_save)
@@ -861,6 +977,7 @@ class SettingsWindow(QWidget):
         # Anything typed in the last few hundred milliseconds must not be lost to the
         # debounce simply because the window was closed promptly.
         self.flush_pending_save()
+        self.flush_pending_keys()
         event.ignore()
         self.hide()
 

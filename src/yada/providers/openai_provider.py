@@ -107,7 +107,7 @@ class _OpenAIBase:
             base_url=API_BASE, headers=_auth_headers(self._api_key), timeout=self._timeout
         )
 
-    async def _raw_models(self) -> list[str]:
+    async def _raw_models(self) -> list[dict]:
         async with self._client() as client:
             resp = await client.get("/models")
         if resp.status_code == 401:
@@ -118,7 +118,7 @@ class _OpenAIBase:
                 provider=PROVIDER,
                 retryable=resp.status_code >= 500,
             )
-        return [m["id"] for m in resp.json().get("data", [])]
+        return [m for m in resp.json().get("data", []) if isinstance(m.get("id"), str)]
 
 
 # --------------------------------------------------------------------------------------
@@ -301,18 +301,18 @@ class OpenAITranscription(_OpenAIBase):
         )
 
     async def list_models(self) -> list[ModelInfo]:
-        ids = await self._raw_models()
         models = [
             ModelInfo(
-                id=mid,
+                id=row["id"],
                 provider=PROVIDER,
                 modality=Modality.TRANSCRIPTION,
-                rank=_rank(mid, _TRANSCRIBE_RANK),
+                rank=_rank(row["id"], _TRANSCRIBE_RANK),
+                created=row.get("created"),
             )
-            for mid in ids
-            if _is_transcription_model(mid)
+            for row in await self._raw_models()
+            if _is_transcription_model(row["id"])
         ]
-        return sorted(models, key=lambda m: (-m.rank, m.id))
+        return sorted(models, key=lambda m: m.sort_key)
 
     async def transcribe(self, wav_bytes: bytes, opts: TranscribeOptions) -> TranscriptionResult:
         data: dict[str, str] = {"model": opts.model}
@@ -389,19 +389,20 @@ class OpenAITransform(_OpenAIBase):
         )
 
     async def list_models(self) -> list[ModelInfo]:
-        ids = await self._raw_models()
         models = [
             ModelInfo(
-                id=mid,
+                id=row["id"],
                 provider=PROVIDER,
                 modality=Modality.TEXT,
-                rank=_rank(mid, _TRANSFORM_RANK),
-                supports_reasoning=mid.startswith("gpt-5") or mid.startswith("o"),
+                rank=_rank(row["id"], _TRANSFORM_RANK),
+                created=row.get("created"),
+                supports_reasoning=row["id"].startswith(("gpt-5", "o1", "o3", "o4")),
             )
-            for mid in ids
-            if not _is_transcription_model(mid) and self._looks_like_chat_model(mid)
+            for row in await self._raw_models()
+            if not _is_transcription_model(row["id"])
+            and self._looks_like_chat_model(row["id"])
         ]
-        return sorted(models, key=lambda m: (-m.rank, m.id))
+        return sorted(models, key=lambda m: m.sort_key)
 
     @staticmethod
     def _looks_like_chat_model(model_id: str) -> bool:

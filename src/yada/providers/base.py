@@ -70,6 +70,10 @@ class ModelInfo:
     # OpenAI's /v1/models does not, so this stays empty there and capability questions
     # fall back to the provider-level baseline.
     supported_parameters: tuple[str, ...] = ()
+    # Unix timestamp from the provider. Both OpenAI's /v1/models and OpenRouter's /models
+    # return one, and it is the only trustworthy way to order by age -- names say nothing
+    # reliable about which model is newer.
+    created: int | None = None
     # Higher sorts first in pickers. Lets a provider surface its own recommendation
     # (e.g. OpenAI's "recommended for new integrations") without hardcoding a list.
     rank: int = 0
@@ -77,6 +81,14 @@ class ModelInfo:
     @property
     def display(self) -> str:
         return self.label or self.id
+
+    @property
+    def sort_key(self) -> tuple:
+        """Newest first, then the curated preference, then name.
+
+        Models without a date sort after dated ones rather than jumping to the top.
+        """
+        return (-(self.created or 0), -self.rank, self.id)
 
 
 # --------------------------------------------------------------------------------------

@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from typing import ClassVar
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QPalette, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -205,6 +205,13 @@ class ModelPicker(QWidget):
         self.status.setText(text)
 
     def set_drift_warning(self, text: str | None) -> None:
+        """Show a drift warning, unless it would just repeat the status line.
+
+        "Models not discovered yet." and "No models discovered yet for this provider"
+        were both being shown, one under the other, saying the same thing twice.
+        """
+        if text and self.status.text().strip().rstrip(".") in text.rstrip("."):
+            text = None
         self.drift.setText(text or "")
         self.drift.setVisible(bool(text))
 
@@ -348,3 +355,94 @@ def wire(widget: QWidget, callback: Callable[[], None]) -> None:
         if signal is not None and hasattr(signal, "connect"):
             signal.connect(lambda *_: callback())
             return
+
+
+class CheckableComboBox(QComboBox):
+    """A dropdown whose items are checkboxes, summarising the selection when closed.
+
+    Qt has no multi-select combo, and the obvious workarounds are worse: a comma-separated
+    text field expects people to know ISO codes, and a modal dialog is heavy for choosing
+    a couple of languages. So the popup's viewport is filtered to toggle a row's check
+    state on click *without* closing, which is the behaviour people expect from this
+    control everywhere else.
+    """
+
+    selection_changed = Signal()
+
+    def __init__(self, *, empty_text: str = "None", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._empty_text = empty_text
+        self._model = QStandardItemModel(self)
+        self.setModel(self._model)
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.lineEdit().setPlaceholderText(empty_text)
+        # Without this the line edit shows the highlighted row rather than the summary.
+        self.lineEdit().installEventFilter(self)
+        self.view().viewport().installEventFilter(self)
+        self._model.itemChanged.connect(self._on_item_changed)
+
+    # -- items --------------------------------------------------------------------------
+
+    def set_options(self, options: list[tuple[str, str]], *, checked: list[str]) -> None:
+        """`options` is [(value, label)]; `checked` the values to tick."""
+        self._model.blockSignals(True)
+        self._model.clear()
+        wanted = set(checked)
+        for value, label in options:
+            item = QStandardItem(label)
+            item.setData(value, Qt.ItemDataRole.UserRole)
+            item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(
+                Qt.CheckState.Checked if value in wanted else Qt.CheckState.Unchecked
+            )
+            self._model.appendRow(item)
+        self._model.blockSignals(False)
+        self._refresh_text()
+
+    def checked_values(self) -> list[str]:
+        out = []
+        for row in range(self._model.rowCount()):
+            item = self._model.item(row)
+            if item.checkState() == Qt.CheckState.Checked:
+                out.append(str(item.data(Qt.ItemDataRole.UserRole)))
+        return out
+
+    # -- behaviour ----------------------------------------------------------------------
+
+    def eventFilter(self, watched, event) -> bool:  # Qt naming convention
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            if watched is self.view().viewport():
+                index = self.view().indexAt(event.pos())
+                if index.isValid():
+                    item = self._model.itemFromIndex(index)
+                    item.setCheckState(
+                        Qt.CheckState.Unchecked
+                        if item.checkState() == Qt.CheckState.Checked
+                        else Qt.CheckState.Checked
+                    )
+                # Consume the click so the popup stays open for the next tick.
+                return True
+            if watched is self.lineEdit():
+                self.showPopup()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _on_item_changed(self, _item) -> None:
+        self._refresh_text()
+        self.selection_changed.emit()
+
+    def _refresh_text(self) -> None:
+        labels = [
+            self._model.item(row).text()
+            for row in range(self._model.rowCount())
+            if self._model.item(row).checkState() == Qt.CheckState.Checked
+        ]
+        # Strip the parenthesised endonym for the summary; the full label is in the list.
+        short = [label.split("  (")[0] for label in labels]
+        if not short:
+            self.lineEdit().setText("")
+        elif len(short) <= 3:
+            self.lineEdit().setText(", ".join(short))
+        else:
+            self.lineEdit().setText(f"{', '.join(short[:3])} and {len(short) - 3} more")

@@ -155,6 +155,9 @@ class Settings:
     # from a binary created seconds earlier is part of what got the old launcher
     # quarantined by Defender, so this is yada's own setting to honour.
     start_on_login: bool = True
+    # Multiplier on the platform's own UI font, 1.0-2.0. Defaults to double: the platform
+    # default is 9pt on Windows, which reads as tiny in a settings window full of prose.
+    text_scale: float = 2.0
     transcription: TranscriptionSettings = field(default_factory=TranscriptionSettings)
     transform: TransformSettings = field(default_factory=TransformSettings)
     vocabulary: Vocabulary = field(default_factory=Vocabulary)
@@ -170,6 +173,8 @@ class Settings:
     # negligible number of tokens, once per model, and is the only way to learn this for
     # providers that publish no capability metadata.
     probe_capabilities: bool = True
+    # On by default: an app that silently goes stale is the problem yada exists to avoid.
+    updates_enabled: bool = True
 
 
 # --------------------------------------------------------------------------------------
