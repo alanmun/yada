@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
@@ -48,8 +49,9 @@ from .providers.base import (
 from .providers.catalog import ModelCatalog
 from .providers.registry import SPECS, build_transcriber, build_transformer
 from .ui.settings_window import SettingsWindow
+from .ui.theme import apply_theme
 from .ui.tray import TrayIcon, ensure_tray_available
-from .updater import UpdateService, mark_healthy, read_current
+from .updater import UpdateService, install_root, mark_healthy, read_current
 
 # The repository the updater watches. Public, so release assets download without credentials.
 UPDATE_REPO = "alanmun/yada"
@@ -186,6 +188,7 @@ class YadaApp(QObject):
         self.tray.settings_requested.connect(self.show_settings)
         self.tray.copy_last_requested.connect(self._copy_last)
         self.tray.check_updates_requested.connect(self.check_updates)
+        self.tray.restart_requested.connect(self.restart)
         self.tray.quit_requested.connect(self.quit)
 
         self.bridge.state.connect(self.tray.set_state, Qt.ConnectionType.QueuedConnection)
@@ -351,6 +354,7 @@ class YadaApp(QObject):
             window.test_provider_requested.connect(self._test_provider)
             window.check_updates_requested.connect(self.check_updates)
             window.preview_sound_requested.connect(self._preview_sound)
+            window.restart_requested.connect(self.restart)
             self.settings_window = window
         else:
             self.settings_window.load(self.settings)
@@ -368,17 +372,64 @@ class YadaApp(QObject):
         asyncio.run_coroutine_threadsafe(self._refresh_models(kind), self.loop)
 
     def quit(self) -> None:
+        self._shutdown(relaunch=False)
+
+    def restart(self) -> None:
+        """Quit and start again, which is what applies a staged update.
+
+        The launcher always picks the newest complete version, so simply starting again
+        lands on the downloaded release -- there is no separate install step.
+        """
+        self._shutdown(relaunch=True)
+
+    def _shutdown(self, *, relaunch: bool) -> None:
         asyncio.run_coroutine_threadsafe(self.session.shutdown(), self.loop)
         if self._hotkey is not None:
             with contextlib.suppress(Exception):
                 self._hotkey.stop()
-        if self._ipc is not None:
-            self._ipc.stop()
         if self._updates is not None:
             asyncio.run_coroutine_threadsafe(self._updates.stop(), self.loop)
+
+        # Order matters. The replacement instance checks whether one is already running,
+        # so the socket must be closed before it starts -- otherwise it finds us, treats
+        # itself as a second copy, forwards a command and exits, leaving nothing running.
+        if self._ipc is not None:
+            self._ipc.stop()
+            self._ipc = None
+
         self.tray.hide()
+        if relaunch:
+            self._spawn_replacement()
         self.async_thread.stop()
         self.app.quit()
+
+    def _spawn_replacement(self) -> None:
+        """Start a detached copy of ourselves, surviving this process's exit."""
+        import subprocess
+
+        launcher = install_root() / ("yada.exe" if sys.platform == "win32" else "yada")
+        if launcher.exists():
+            command = [str(launcher)]
+        elif getattr(sys, "frozen", False):
+            command = [sys.executable]
+        else:
+            # Source checkout: no managed install to launch.
+            command = [sys.executable, "-m", "yada"]
+        try:
+            if sys.platform == "win32":
+                # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                subprocess.Popen(command, close_fds=True, creationflags=0x00000008 | 0x00000200)
+            else:
+                subprocess.Popen(
+                    command,
+                    close_fds=True,
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # Nothing useful left to do: the tray is already gone. Recorded for the log.
+            print(f"yada: could not restart automatically ({exc})")
 
     # ==================================================================================
     # Async work
@@ -498,6 +549,8 @@ class YadaApp(QObject):
     def _on_update_status(self, status) -> None:
         if status is not None and self._updates is not None:
             self.tray.set_update_ready(status.ready_version)
+            if self.settings_window is not None:
+                self.settings_window.set_update_ready(status.ready_version)
         self._push_status_to_settings()
 
     def _push_status_to_settings(self) -> None:
@@ -541,6 +594,7 @@ class YadaApp(QObject):
             window.set_hotkey_status(self._hotkey.status())
         if self._updates is not None:
             window.set_update_status(self._updates.status.summary())
+            window.set_update_ready(self._updates.status.ready_version)
         window.refresh_key_status()
 
     def _on_settings_saved(self, new_settings: Settings) -> None:
@@ -558,6 +612,8 @@ class YadaApp(QObject):
             self._start_hotkey()
 
         self._configure_chimes()
+        if new_settings.theme != old.theme:
+            apply_theme(self.app, new_settings.theme)
         self.tray.set_shortcut_label(self._shortcut_label())
         if new_settings.transcription.provider != old.transcription.provider:
             self.refresh_models("transcription")
@@ -610,6 +666,10 @@ def main(argv: list[str] | None = None, *, start_recording: bool = False) -> int
     # The fix for the behaviour that prompted this project: without this, closing the
     # settings window terminates the app instead of leaving it in the tray.
     app.setQuitOnLastWindowClosed(False)
+
+    # Before any widget exists, so nothing is built against the platform palette and then
+    # recoloured. Read straight from disk: YadaApp has not loaded settings yet.
+    apply_theme(app, config.load().theme)
 
     yada = YadaApp(app)
     yada.start()

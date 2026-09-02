@@ -21,7 +21,7 @@ SIZES = (16, 20, 24, 32, 48, 64)
 # Slate when idle, red while recording, amber while working. Chosen to stay distinguishable
 # for the common forms of colour blindness by differing in lightness as well as hue.
 STATE_COLOURS: dict[SessionState, str] = {
-    SessionState.IDLE: "#5b6472",
+    SessionState.IDLE: "#2f6fd0",
     SessionState.RECORDING: "#d9342b",
     SessionState.TRANSCRIBING: "#e08c1a",
     SessionState.TRANSFORMING: "#c065d0",

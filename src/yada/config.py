@@ -147,6 +147,10 @@ class AudioSettings:
 @dataclass(slots=True)
 class Settings:
     version: int = SCHEMA_VERSION
+    # "blue" is yada's own palette; "system" matches the desktop. Qt's platform default is
+    # a lot of flat grey on Windows, which is why blue is the default rather than an option
+    # nobody finds.
+    theme: str = "blue"
     transcription: TranscriptionSettings = field(default_factory=TranscriptionSettings)
     transform: TransformSettings = field(default_factory=TransformSettings)
     vocabulary: Vocabulary = field(default_factory=Vocabulary)

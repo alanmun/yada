@@ -38,6 +38,7 @@ class TrayIcon(QObject):
     settings_requested = Signal()
     copy_last_requested = Signal()
     check_updates_requested = Signal()
+    restart_requested = Signal()
     quit_requested = Signal()
 
     def __init__(self, *, shortcut_label: str = "", parent: QObject | None = None) -> None:
@@ -66,6 +67,13 @@ class TrayIcon(QObject):
         self._action_update = QAction("Check for updates", self._menu)
         self._action_update.triggered.connect(self.check_updates_requested.emit)
 
+        # Only appears once an update is downloaded and waiting. Restarting is the entire
+        # install step, so offering it at the moment it becomes useful -- and not before --
+        # is clearer than a permanent action that usually does nothing interesting.
+        self._action_restart = QAction("Restart to finish updating", self._menu)
+        self._action_restart.triggered.connect(self.restart_requested.emit)
+        self._action_restart.setVisible(False)
+
         self._action_quit = QAction("Quit yada", self._menu)
         self._action_quit.triggered.connect(self.quit_requested.emit)
 
@@ -76,6 +84,7 @@ class TrayIcon(QObject):
         self._menu.addAction(self._action_settings)
         self._menu.addAction(self._action_update)
         self._menu.addSeparator()
+        self._menu.addAction(self._action_restart)
         self._menu.addAction(self._action_quit)
         self._tray.setContextMenu(self._menu)
         self._refresh()
@@ -123,9 +132,12 @@ class TrayIcon(QObject):
         """
         self._update_ready = version
         self._action_update.setText(
-            f"Version {version} ready — restart to apply" if version else "Check for updates"
+            f"Version {version} is ready" if version else "Check for updates"
         )
         self._action_update.setEnabled(version is None)
+        self._action_restart.setVisible(version is not None)
+        if version:
+            self._action_restart.setText(f"Restart to finish updating to {version}")
         self._refresh()
 
     @property

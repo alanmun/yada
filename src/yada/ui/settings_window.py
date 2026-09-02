@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -42,12 +42,14 @@ from ..providers.base import ReasoningEffort, ServiceTier, Support
 from ..providers.registry import PLANNED, SPECS
 from .sound_picker import ChimeRow, SoundLibraryEditor, VolumeRow
 from .steps_editor import StepsEditor
+from .theme import THEME_LABELS, THEMES
 from .widgets import (
     ModelPicker,
     PromptEditor,
     StringListEditor,
     SupportCheckBox,
     button_row,
+    error_label,
     hint,
     labelled,
 )
@@ -75,6 +77,7 @@ class SettingsWindow(QWidget):
     check_updates_requested = Signal()
     preview_sound_requested = Signal(str)
     sound_library_changed = Signal()
+    restart_requested = Signal()
 
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -93,17 +96,39 @@ class SettingsWindow(QWidget):
         self.tabs.addTab(_scrollable(self._build_audio_output()), "Audio && output")
         self.tabs.addTab(_scrollable(self._build_updates()), "Updates")
 
-        self.save_button = QPushButton("Save")
-        self.save_button.setDefault(True)
-        self.save_button.clicked.connect(self._on_save)
+        # No Save button. Every change is written as it is made, debounced so that typing
+        # in a text field does not mean one write per keystroke. The flag suppresses saves
+        # while load() is populating widgets, which would otherwise save the values it just
+        # read back over themselves.
+        self._loading = False
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self._commit)
+
+        self._saved_note = hint("Changes are saved as you make them.")
+
+        # Only appears once an update is downloaded and waiting: restarting is the whole
+        # install step, so the action shows up exactly when it does something.
+        self.restart_button = QPushButton("Restart to finish updating")
+        self.restart_button.clicked.connect(self.restart_requested.emit)
+        self.restart_button.setVisible(False)
+
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.hide)
 
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.addWidget(self._saved_note, 1)
+        bottom.addWidget(self.restart_button)
+        bottom.addWidget(self.close_button)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.tabs, 1)
-        layout.addLayout(button_row(self.close_button, self.save_button))
+        layout.addLayout(bottom)
 
         self.load(settings)
+        self._wire_autosave()
 
     # ==================================================================================
     # Providers
@@ -421,6 +446,9 @@ class SettingsWindow(QWidget):
 
         self.hotkey_field = QLineEdit()
         self.hotkey_field.setPlaceholderText("ctrl+shift+;")
+        self.hotkey_field.textChanged.connect(self._validate_hotkey)
+        self.hotkey_error = error_label("")
+        self.hotkey_error.hide()
         layout.addWidget(
             labelled(
                 "Shortcut",
@@ -428,6 +456,7 @@ class SettingsWindow(QWidget):
                 tip="Needs at least one modifier, or it would fire while you type.",
             )
         )
+        layout.addWidget(self.hotkey_error)
 
         self.hotkey_backend = QComboBox()
         for value, label in [
@@ -458,6 +487,23 @@ class SettingsWindow(QWidget):
         layout.addStretch(1)
         return page
 
+    def _validate_hotkey(self, text: str) -> None:
+        """Report a bad shortcut inline and keep the last good one.
+
+        With autosave, a half-typed "ctrl+shift+" would otherwise be saved and applied on
+        every keystroke, and each failure would raise a tray notification.
+        """
+        from ..hotkey import Combo, InvalidCombo
+
+        try:
+            Combo.parse(text)
+        except InvalidCombo as exc:
+            self.hotkey_error.setText(str(exc))
+            self.hotkey_error.show()
+            return
+        self._last_valid_combo = text.strip()
+        self.hotkey_error.hide()
+
     def _copy_toggle_command(self) -> None:
         from ..output import copy
 
@@ -476,6 +522,17 @@ class SettingsWindow(QWidget):
     def _build_audio_output(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+
+        appearance = QGroupBox("Appearance")
+        appearance_layout = QVBoxLayout(appearance)
+        self.theme_combo = QComboBox()
+        for value in THEMES:
+            self.theme_combo.addItem(THEME_LABELS[value], value)
+        appearance_layout.addWidget(self.theme_combo)
+        appearance_layout.addWidget(
+            hint("Applies immediately. 'Match my desktop' uses your system light or dark theme.")
+        )
+        layout.addWidget(appearance)
 
         self.audio_device = QComboBox()
         self._reload_devices()
@@ -618,8 +675,16 @@ class SettingsWindow(QWidget):
     # ==================================================================================
 
     def load(self, settings: Settings) -> None:
+        self._loading = True
+        try:
+            self._load(settings)
+        finally:
+            self._loading = False
+
+    def _load(self, settings: Settings) -> None:
         self._settings = dataclasses.replace(settings)
         s = self._settings
+        self._last_valid_combo = s.hotkey.combo
 
         self._select(self.stt_provider, s.transcription.provider)
         self.stt_streaming.setChecked(s.transcription.prefer_streaming)
@@ -643,6 +708,7 @@ class SettingsWindow(QWidget):
         self._select(self.audio_device, s.audio.device)
         self.audio_gain.setValue(s.audio.input_gain)
 
+        self._select(self.theme_combo, s.theme)
         self._select(self.paste_mode, s.output.paste_mode)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
         self.chime_transcription.set_enabled_state(s.output.chime_on_transcription)
@@ -688,12 +754,14 @@ class SettingsWindow(QWidget):
             code.strip() for code in self.vocab_languages.text().split(",") if code.strip()
         ] or ["en"]
 
-        s.hotkey.combo = self.hotkey_field.text().strip() or "ctrl+shift+;"
+        # Never persist a shortcut that does not parse; keep the last one that did.
+        s.hotkey.combo = self._last_valid_combo or "ctrl+shift+;"
         s.hotkey.backend = self.hotkey_backend.currentData() or "auto"
 
         s.audio.device = self.audio_device.currentData()
         s.audio.input_gain = float(self.audio_gain.value())
 
+        s.theme = self.theme_combo.currentData() or "blue"
         s.output.paste_mode = self.paste_mode.currentData() or "off"
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
         s.output.chime_on_transcription = self.chime_transcription.is_enabled()
@@ -712,8 +780,64 @@ class SettingsWindow(QWidget):
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
 
-    def _on_save(self) -> None:
+    # ==================================================================================
+    # Autosave
+    # ==================================================================================
+
+    def _wire_autosave(self) -> None:
+        """Connect every input's change signal to the debounced save.
+
+        Dispatched by widget type rather than by trying every signal name on every widget:
+        a QComboBox has both currentIndexChanged and editTextChanged, and connecting both
+        would save twice for one change.
+        """
+        from PySide6.QtWidgets import QAbstractSlider, QScrollBar, QSpinBox
+
+        from .sound_picker import ChimeRow, SoundLibraryEditor, VolumeRow
+        from .widgets import ModelPicker, StringListEditor
+
+        for child in self.findChildren(QWidget):
+            # A scroll bar is a QAbstractSlider, so without this every scroll of the
+            # settings page queued a save.
+            if isinstance(child, QScrollBar):
+                continue
+            if isinstance(child, ChimeRow | VolumeRow | StringListEditor | ModelPicker):
+                child.changed.connect(self._schedule_save)
+            elif isinstance(child, SoundLibraryEditor):
+                child.library_changed.connect(self._schedule_save)
+            elif isinstance(child, StepsEditor):
+                child.changed.connect(self._schedule_save)
+            elif isinstance(child, QCheckBox):
+                child.toggled.connect(self._schedule_save)
+            elif isinstance(child, QComboBox):
+                child.currentIndexChanged.connect(self._schedule_save)
+                if child.isEditable():
+                    child.editTextChanged.connect(self._schedule_save)
+            elif isinstance(child, QLineEdit | PromptEditor):
+                child.textChanged.connect(self._schedule_save)
+            elif isinstance(child, QDoubleSpinBox | QSpinBox | QAbstractSlider):
+                child.valueChanged.connect(self._schedule_save)
+
+    def _schedule_save(self, *_args) -> None:
+        if self._loading:
+            return
+        self._saved_note.setText("Saving…")
+        self._save_timer.start()
+
+    def _commit(self) -> None:
         self.saved.emit(self.collect())
+        self._saved_note.setText("Changes are saved as you make them.")
+
+    def flush_pending_save(self) -> None:
+        """Write immediately, for the moment the window closes."""
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+            self._commit()
+
+    def set_update_ready(self, version: str | None) -> None:
+        self.restart_button.setVisible(bool(version))
+        if version:
+            self.restart_button.setText(f"Restart to finish updating to {version}")
 
     # -- window behaviour ----------------------------------------------------------------
 
@@ -723,6 +847,9 @@ class SettingsWindow(QWidget):
         The absence of exactly this is why Whispering exits when you close its window on
         Windows instead of staying in the tray.
         """
+        # Anything typed in the last few hundred milliseconds must not be lost to the
+        # debounce simply because the window was closed promptly.
+        self.flush_pending_save()
         event.ignore()
         self.hide()
 

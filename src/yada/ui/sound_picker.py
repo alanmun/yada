@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -166,9 +167,16 @@ class SoundLibraryEditor(QWidget):
         play.clicked.connect(lambda _=False, sid=sound.id: self.preview_requested.emit(sid))
         layout.addWidget(play)
 
-        remove = QPushButton("✕")
-        remove.setFixedSize(QSize(28, 28))
-        remove.setToolTip(f"Remove “{sound.name}” from yada")
+        # Qt's own close icon rather than a "✕" character: the glyph is missing from some
+        # default fonts and rendered as a dot, which is the same class of bug as the cp1252
+        # console crash. A standard icon is always available and looks native.
+        remove = QPushButton()
+        remove.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton)
+        )
+        remove.setFixedSize(QSize(30, 28))
+        remove.setAccessibleName(f"Remove {sound.name}")
+        remove.setToolTip(f"Remove \u201c{sound.name}\u201d from yada")
         remove.clicked.connect(lambda _=False, s=sound: self._on_remove(s))
         layout.addWidget(remove)
         return frame
