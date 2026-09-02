@@ -130,7 +130,8 @@ async def test_signed_release_downloads_verifies_and_extracts(install_root, serv
     archive = await github.download_and_verify(release, public_key_b64=pub)
     target = github.extract_release(archive, "0.3.2")
 
-    assert (target / "yada").exists(), "executable must land at the top level"
+    exe = core.executable_name()  # "yada.exe" on Windows
+    assert (target / exe).exists(), "executable must land at the top level"
     assert not (target / "yada-0.3.2").exists(), "single wrapper dir should be flattened"
     assert (target / ".complete").exists(), "completion marker is what the launcher trusts"
     assert not archive.exists(), "archive should be cleaned up after extraction"
