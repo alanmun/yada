@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import os
 import shutil
 import sys
 import tarfile
@@ -287,42 +288,75 @@ def _safe_members(names: list[str]) -> None:
             raise UpdateError(f"archive contains an unsafe path: {name}")
 
 
-def extract_release(archive: Path, version: str) -> Path:
-    """Unpack into versions/<version>/ and mark it complete.
+def _empty_target(target: Path) -> None:
+    """Remove `target` completely, or raise.
 
-    The `.complete` marker is written last and is the only thing the launcher trusts, so a
-    crash mid-extraction leaves a directory that is simply ignored rather than a
-    half-installed release that boots.
+    Deliberately not ignore_errors. The previous version swallowed failures here, so a
+    single locked file -- a DLL still held by a running instance is the obvious case on
+    Windows -- survived, the new files were written alongside it, and `.complete` then
+    marked the mixture as trustworthy. Refusing to install beats installing a version
+    made of two.
     """
-    target = versions_dir() / version
+    if not target.exists():
+        return
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        raise UpdateError(
+            f"could not clear the previous {target.name} directory ({exc}). "
+            "Something is still using a file inside it; close yada and try again."
+        ) from exc
     if target.exists():
-        shutil.rmtree(target, ignore_errors=True)
-    target.mkdir(parents=True, exist_ok=True)
+        raise UpdateError(
+            f"{target.name} could not be fully removed, so installing over it would mix "
+            "two versions. Close yada and try again."
+        )
+
+
+def extract_release(archive: Path, version: str) -> Path:
+    """Unpack into versions/<version>/, leaving no trace of whatever was there before.
+
+    Extraction happens in a fresh directory that is then renamed into place, so a version
+    directory is only ever absent, or complete and made of exactly one release. Merging new
+    files into a partially deleted old directory is the corruption this avoids; an
+    interrupted extraction leaves an ignorable `.incoming-` directory instead.
+
+    The `.complete` marker is written last and is the only thing the launcher trusts.
+    """
+    versions = versions_dir()
+    versions.mkdir(parents=True, exist_ok=True)
+    target = versions / version
+    staging_target = versions / f".incoming-{version}-{os.getpid()}"
+
+    shutil.rmtree(staging_target, ignore_errors=True)
+    staging_target.mkdir()  # no exist_ok: this must be a directory we just created
 
     try:
         if archive.suffix == ".zip":
             with zipfile.ZipFile(archive) as zf:
                 _safe_members(zf.namelist())
-                zf.extractall(target)
+                zf.extractall(staging_target)
         else:
             with tarfile.open(archive) as tf:
                 _safe_members(tf.getnames())
-                tf.extractall(target, filter="data")
+                tf.extractall(staging_target, filter="data")
+
+        _flatten_single_dir(staging_target)
+
+        exe = staging_target / ("yada.exe" if sys.platform == "win32" else "yada")
+        if not exe.exists():
+            raise UpdateError(f"extracted release {version} contains no {exe.name}")
+        if sys.platform != "win32":
+            exe.chmod(0o755)
+
+        _empty_target(target)
+        os.replace(staging_target, target)
     except UpdateError:
-        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(staging_target, ignore_errors=True)
         raise
     except Exception as exc:
-        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(staging_target, ignore_errors=True)
         raise UpdateError(f"could not extract {archive.name}: {exc}") from exc
-
-    _flatten_single_dir(target)
-
-    exe = target / ("yada.exe" if sys.platform == "win32" else "yada")
-    if not exe.exists():
-        shutil.rmtree(target, ignore_errors=True)
-        raise UpdateError(f"extracted release {version} contains no {exe.name}")
-    if sys.platform != "win32":
-        exe.chmod(0o755)
 
     (target / ".complete").write_text(version + "\n", encoding="utf-8")
     archive.unlink(missing_ok=True)

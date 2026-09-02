@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from .core import (
     InstalledVersion,
+    abandoned_extractions,
     install_root,
     installed_versions,
     is_newer,
@@ -56,6 +57,7 @@ __all__ = [
     "UpdateError",
     "UpdateService",
     "UpdateStatus",
+    "abandoned_extractions",
     "download_and_verify",
     "extract_release",
     "fetch_latest",

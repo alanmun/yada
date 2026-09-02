@@ -225,6 +225,17 @@ them. CI also verifies that the signature it just produced validates against the
 *compiled into the binaries being shipped*, so pasting the wrong half of a keypair fails the
 release instead of publishing something every client refuses.
 
+**A version directory contains exactly one release.** Extraction builds into
+`.incoming-<v>-<pid>` and renames into place, and the previous directory is removed with a
+*verified* delete rather than a best-effort one. The earlier code passed
+`ignore_errors=True` and then extracted into whatever survived, so one locked file — a DLL
+still held by a running instance is the obvious case on Windows — meant the new files
+landed alongside the old ones and `.complete` marked the mixture as trustworthy. Now the
+install refuses with something actionable instead, which is the better trade: "close yada
+and try again" beats a build made of two releases. An interrupted extraction leaves an
+ignorable `.incoming-` directory, which is skipped by `installed_versions()` so it cannot
+occupy a retention slot, and is cleared on the next prune.
+
 **Disk retention.** A version directory is roughly 190 MB, so this is not housekeeping
 trivia. The two newest releases are kept and the rest deleted, and `staging/` is emptied
 since a partial download is never resumed. Pruning runs at startup as well as after

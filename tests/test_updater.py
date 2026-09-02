@@ -428,3 +428,75 @@ def test_pruning_is_safe_with_nothing_to_prune(install_root):
     core.write_current("0.1.5")
     assert core.prune_old_versions() == []
     assert [v.version for v in core.installed_versions()] == ["0.1.5"]
+
+
+# --------------------------------------------------------------------------------------
+# Version isolation — two releases must never blend into one directory
+# --------------------------------------------------------------------------------------
+
+
+def test_reinstalling_a_version_leaves_nothing_from_the_old_one(install_root, tmp_path):
+    """The file that matters is one the new archive does not contain.
+
+    Extracting over a previous install used to merge, so a file only the old release had
+    survived into the new version's directory.
+    """
+    target = core.versions_dir() / "9.9.9"
+    target.mkdir(parents=True)
+    (target / core.executable_name()).write_text("old")
+    (target / "leftover-from-the-old-release.dll").write_text("stale")
+    (target / ".complete").write_text("9.9.9")
+
+    archive = _pack(tmp_path, "yada-9.9.9.tar.gz", as_zip=False)
+    github.extract_release(archive, "9.9.9")
+
+    assert not (target / "leftover-from-the-old-release.dll").exists(), (
+        "a file from the previous release must not survive into the new version"
+    )
+    assert (target / core.executable_name()).read_text() != "old"
+    assert (target / "_internal" / "payload.bin").exists()
+
+
+def test_extraction_refuses_rather_than_merging_when_the_old_dir_cannot_be_removed(
+    install_root, tmp_path, monkeypatch
+):
+    """Refusing to install beats installing a version made of two.
+
+    The old code passed ignore_errors=True, so a locked file survived silently and the new
+    files were written alongside it -- then marked complete.
+    """
+    target = core.versions_dir() / "9.9.9"
+    target.mkdir(parents=True)
+    (target / "locked.dll").write_text("held open by a running instance")
+
+    def refuse(path, *args, ignore_errors=False, **kwargs):
+        # Honour ignore_errors, so only the verified wipe fails and the incidental
+        # best-effort cleanups still behave as they do in reality.
+        if ignore_errors:
+            return
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(github.shutil, "rmtree", refuse)
+
+    archive = _pack(tmp_path, "yada-9.9.9.tar.gz", as_zip=False)
+    with pytest.raises(github.UpdateError, match="could not clear"):
+        github.extract_release(archive, "9.9.9")
+
+    assert (target / "locked.dll").exists(), "the old install is left intact"
+    assert not (target / ".complete").exists(), "a refused install must not be marked usable"
+
+
+def test_an_interrupted_extraction_is_not_mistaken_for_a_release(install_root):
+    _install_fake("0.1.5")
+    leftover = core.versions_dir() / ".incoming-0.1.6-4242"
+    leftover.mkdir(parents=True)
+    (leftover / "half-written.bin").write_text("x")
+
+    assert [v.version for v in core.installed_versions()] == ["0.1.5"], (
+        "a half-finished extraction must not appear as an installed version"
+    )
+    assert core.abandoned_extractions() == [leftover]
+
+    core.write_current("0.1.5")
+    core.prune_old_versions()
+    assert not leftover.exists(), "pruning clears abandoned extractions"

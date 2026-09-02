@@ -106,30 +106,65 @@ def prune_old_versions(root: Path, keep_version: str) -> list[str]:
     return removed
 
 
-def install(here: Path, root: Path, version: str) -> None:
-    target = root / "versions" / version
+def _empty_target(target: Path) -> None:
+    """Remove `target` completely, or raise SystemExit with something a human can act on.
+
+    Not ignore_errors, and not a merge. A single locked file -- a DLL still held by a
+    running yada is the obvious case -- would otherwise survive, the new files would be
+    written alongside it, and the result would be a version made of two releases.
+    """
+    if not target.exists():
+        return
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        raise SystemExit(
+            f"Could not replace the existing {target.name} install ({exc}).\n"
+            "Something is still using a file inside it. Quit yada from its tray icon and "
+            "run this installer again."
+        ) from exc
     if target.exists():
-        shutil.rmtree(target, ignore_errors=True)
-    target.mkdir(parents=True, exist_ok=True)
+        raise SystemExit(
+            f"Could not fully remove the existing {target.name} install.\n"
+            "Installing over it would mix two versions. Quit yada and try again."
+        )
 
-    print(f"  copying application files to {target}")
-    internal = here / "_internal"
-    if internal.is_dir():
-        shutil.copytree(internal, target / "_internal", dirs_exist_ok=True)
-    shutil.copy2(here / EXE, target / EXE)
-    if not IS_WINDOWS:
-        (target / EXE).chmod(0o755)
 
-    # A copy of the launcher lives beside the app in every version directory, so the app
-    # can refresh the stable one at the install root when a release changes it. Updates
-    # only ever write into versions/<v>/, so without this the root launcher installed
-    # today would never be replaced.
-    launcher_source = here / LAUNCHER_SRC
-    if launcher_source.is_file():
-        shutil.copy2(launcher_source, target / LAUNCHER_SRC)
+def install(here: Path, root: Path, version: str) -> None:
+    """Place this release in its own directory, containing nothing else.
 
-    # Written last: the launcher treats this marker as the only proof a version is usable,
-    # so an interrupted install is ignored rather than half-booted.
+    Built in a temporary directory and renamed into place, so the installed version is
+    only ever absent, or complete and made of exactly one release.
+    """
+    versions = root / "versions"
+    versions.mkdir(parents=True, exist_ok=True)
+    target = versions / version
+    incoming = versions / f".incoming-{version}-{os.getpid()}"
+    shutil.rmtree(incoming, ignore_errors=True)
+    incoming.mkdir()  # no exist_ok: must be a directory we just created
+
+    try:
+        print(f"  copying application files to {target}")
+        internal = here / "_internal"
+        if internal.is_dir():
+            # No dirs_exist_ok: the destination is known to be empty, so there is nothing
+            # to merge with. The old code merged, which is how two versions could blend.
+            shutil.copytree(internal, incoming / "_internal")
+        shutil.copy2(here / EXE, incoming / EXE)
+        if not IS_WINDOWS:
+            (incoming / EXE).chmod(0o755)
+
+        _empty_target(target)
+        os.replace(incoming, target)
+    except SystemExit:
+        shutil.rmtree(incoming, ignore_errors=True)
+        raise
+    except Exception:
+        shutil.rmtree(incoming, ignore_errors=True)
+        raise
+
+    # Written last: the only proof a version is usable, so an interrupted install is
+    # ignored rather than half-booted.
     (target / ".complete").write_text(version + "\n", encoding="utf-8")
 
     # No launcher binary is installed at the root any more. The one that used to live

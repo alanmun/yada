@@ -112,11 +112,29 @@ class InstalledVersion:
 
 
 def installed_versions() -> list[InstalledVersion]:
+    """Installed releases, newest first.
+
+    Dot-prefixed directories are skipped: extraction builds into `.incoming-<v>-<pid>`
+    before renaming into place, and an interrupted one must not be mistaken for a release
+    -- it would show up in the settings pane and occupy a retention slot.
+    """
     root = versions_dir()
     if not root.is_dir():
         return []
-    found = [InstalledVersion(p.name, p) for p in root.iterdir() if p.is_dir()]
+    found = [
+        InstalledVersion(p.name, p)
+        for p in root.iterdir()
+        if p.is_dir() and not p.name.startswith(".")
+    ]
     return sorted(found, key=lambda v: parse_version(v.version), reverse=True)
+
+
+def abandoned_extractions() -> list[Path]:
+    """Half-finished extraction directories, safe to delete."""
+    root = versions_dir()
+    if not root.is_dir():
+        return []
+    return [p for p in root.iterdir() if p.is_dir() and p.name.startswith(".incoming-")]
 
 
 def read_current() -> str | None:
@@ -202,9 +220,11 @@ def select_version_to_launch() -> InstalledVersion | None:
 
 
 def prune_old_versions(keep: int = KEEP_VERSIONS) -> list[str]:
-    """Drop old releases, never the running one."""
+    """Drop old releases, never the running one. Also clears abandoned extractions."""
     running = read_current()
     removed: list[str] = []
+    for leftover in abandoned_extractions():
+        shutil.rmtree(leftover, ignore_errors=True)
     for stale in installed_versions()[keep:]:
         if stale.version == running:
             continue
