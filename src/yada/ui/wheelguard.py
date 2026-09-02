@@ -11,8 +11,14 @@ controls built later -- the transform steps editor and the sound library rebuild
 on the fly, and a per-widget approach would miss exactly those.
 
 The wheel is not merely swallowed. It is forwarded to the nearest scrolling ancestor, so
-the page moves as the user intended. A control that genuinely has focus keeps its normal
-behaviour, so deliberate adjustment with the wheel still works.
+the page moves as the user intended.
+
+Focus is not an exemption. An earlier version allowed the wheel on a focused control, on
+the reasoning that clicking into something first makes the adjustment deliberate. In
+practice a control stays focused long after you have stopped thinking about it, so
+scrolling the page later still rewrote the value -- and the value it rewrote was one the
+user had just set by hand. These controls are adjusted by clicking their arrows, dragging
+them, or typing.
 """
 
 from __future__ import annotations
@@ -54,10 +60,9 @@ class WheelGuard(QObject):
             return False
         if not isinstance(watched, GUARDED) or isinstance(watched, EXEMPT):
             return False
-        if watched.hasFocus():
-            return False  # deliberate: the user clicked into it first
-
-        # Give the scroll to the page instead of the control.
+        # Give the scroll to the page instead of the control -- always. Focus used to be
+        # an exemption here and it was one in name only: the control the user last touched
+        # is still focused when they scroll past it.
         area = _scrolling_ancestor(watched)
         if area is not None:
             QApplication.sendEvent(area.viewport(), event)

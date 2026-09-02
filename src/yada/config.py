@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
 import types
 import typing
 from dataclasses import dataclass, field, is_dataclass
@@ -131,6 +132,11 @@ class OutputSettings:
     chime_transformation_sound: str = "builtin:transformation"
     chime_volume: float = 0.6
     always_copy_to_clipboard: bool = True
+    # Desktop notifications for warnings and errors. Off by default on Windows, where they
+    # are intrusive toasts that steal a corner of the screen for something the chimes and
+    # the settings pane already convey. On Linux they are the ordinary way an app says
+    # something went wrong, so they stay on.
+    show_notifications: bool = field(default_factory=lambda: sys.platform != "win32")
 
 
 @dataclass(slots=True)

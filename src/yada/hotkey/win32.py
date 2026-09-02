@@ -22,6 +22,25 @@ HOTKEY_ID = 1
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 PM_REMOVE = 0x0001
+ERROR_HOTKEY_ALREADY_REGISTERED = 1409
+
+# A combo held by a process that is on its way out cannot be registered until it goes, and
+# that is the ordinary case: yada replacing yada. Retrying briefly turns "the shortcut is
+# taken" -- reported once, in a tab the user has no reason to open -- into a shortcut that
+# simply works a second later.
+REGISTER_ATTEMPTS = 6
+REGISTER_RETRY_DELAY = 0.5
+
+
+def _user32():
+    """user32 with `use_last_error`, which is what makes GetLastError readable.
+
+    `ctypes.windll.user32` does not set it, so `ctypes.get_last_error()` against that
+    handle returns 0. A failed registration therefore reported "RegisterHotKey failed
+    (error 0)" -- which is why an instance that never registered the shortcut looked
+    identical to one that had.
+    """
+    return ctypes.WinDLL("user32", use_last_error=True)
 
 
 class Win32HotkeyBackend:
@@ -50,21 +69,22 @@ class Win32HotkeyBackend:
         self._ready.clear()
         self._thread = threading.Thread(target=self._run, name="yada-hotkey", daemon=True)
         self._thread.start()
-        # Wait briefly so the settings UI can report a conflict immediately rather than
-        # claiming success and failing silently.
-        self._ready.wait(timeout=3.0)
+        # Must outlast the registration retries, or the settings pane reports "not
+        # running" for a shortcut that is about to come up.
+        self._ready.wait(timeout=REGISTER_ATTEMPTS * REGISTER_RETRY_DELAY + 2.0)
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread_id is not None:
             # Wake the blocking GetMessage so the thread can exit and unregister.
-            ctypes.windll.user32.PostThreadMessageW(
-                wintypes.DWORD(self._thread_id), WM_QUIT, 0, 0
-            )
+            ctypes.windll.user32.PostThreadMessageW(wintypes.DWORD(self._thread_id), WM_QUIT, 0, 0)
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         self._thread = None
         self._thread_id = None
+
+    def problem(self) -> str | None:
+        return self._error
 
     def status(self) -> str:
         if self._error:
@@ -77,16 +97,29 @@ class Win32HotkeyBackend:
     # -- hotkey thread ------------------------------------------------------------------
 
     def _run(self) -> None:
-        user32 = ctypes.windll.user32
+        import time
+
+        user32 = _user32()
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         assert self._combo is not None
         modifiers, vk = self._combo.to_win32()
 
-        if not user32.RegisterHotKey(None, HOTKEY_ID, modifiers, vk):
+        code = 0
+        for attempt in range(REGISTER_ATTEMPTS):
+            ctypes.set_last_error(0)
+            if user32.RegisterHotKey(None, HOTKEY_ID, modifiers, vk):
+                code = 0
+                break
             code = ctypes.get_last_error()
+            # Only a conflict is worth waiting out; anything else will not fix itself.
+            if code != ERROR_HOTKEY_ALREADY_REGISTERED:
+                break
+            if attempt < REGISTER_ATTEMPTS - 1 and not self._stop.is_set():
+                time.sleep(REGISTER_RETRY_DELAY)
+        if code:
             self._error = (
                 f"{self._combo.display} is already taken by another application"
-                if code == 1409  # ERROR_HOTKEY_ALREADY_REGISTERED
+                if code == ERROR_HOTKEY_ALREADY_REGISTERED
                 else f"RegisterHotKey failed (error {code})"
             )
             self._ready.set()

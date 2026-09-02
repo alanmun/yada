@@ -45,6 +45,10 @@ class ExternalHotkeyBackend:
     def stop(self) -> None:
         self._combo = None
 
+    def problem(self) -> str | None:
+        # Nothing to fail: the trigger arrives over IPC, so there is no grab to lose.
+        return None
+
     def status(self) -> str:
         combo = self._combo.display if self._combo else "your shortcut"
         return (

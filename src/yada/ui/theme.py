@@ -41,6 +41,17 @@ ICON_DIR = Path(__file__).resolve().parent.parent / "assets" / "icons"
 _TICK_SIZES = (16, 20, 24, 28, 32, 40)
 
 
+def _arrow_url(size: int, *, up: bool) -> str:
+    """Path to the spin-box arrow closest to `size`, as a stylesheet url().
+
+    Same constraint as the tick: a styled `::up-button` draws no arrow of its own, and
+    Qt stylesheets need a real file for `image:`.
+    """
+    best = min(_TICK_SIZES, key=lambda candidate: abs(candidate - size))
+    name = "up" if up else "down"
+    return (ICON_DIR / f"arrow-{name}-{best}.png").as_posix()
+
+
 def _tick_url(indicator: int) -> str:
     """Path to the tick closest to the indicator size, as a stylesheet url().
 
@@ -52,6 +63,7 @@ def _tick_url(indicator: int) -> str:
     path = ICON_DIR / f"check-{best}.png"
     # Forward slashes: Qt stylesheets treat a backslash as an escape.
     return path.as_posix()
+
 
 # The platform default, captured before anything changes it. Reading the current font on
 # each call would compound the scale every time a theme was reapplied.
@@ -145,6 +157,14 @@ def blue_stylesheet(point_size: float = 9.0) -> str:
     indicator = max(14, round(point_size * 1.5))
     row = max(20, round(point_size * 2.1))
     tick = _tick_url(indicator)
+    # Spin-box buttons are sized here for the same reason the indicator is: left alone they
+    # keep the style's native metric while the field grows with the text setting, so at the
+    # larger sizes they end up as a 14px sliver beside a 35px field. Clicking "up" then
+    # lands in the text box and only focuses it -- which is exactly what it did.
+    spin_button = max(18, round(point_size * 2.0))
+    spin_arrow = max(8, round(point_size * 1.1))
+    arrow_up = _arrow_url(spin_arrow, up=True)
+    arrow_down = _arrow_url(spin_arrow, up=False)
     return f"""
 QGroupBox {{
     border: 1px solid {BLUE["mid"]};
@@ -195,6 +215,41 @@ QLineEdit, QPlainTextEdit, QComboBox, QListWidget, QDoubleSpinBox, QSpinBox {{
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus,
 QDoubleSpinBox:focus, QSpinBox:focus {{
     border-color: {BLUE["highlight"]};
+}}
+
+/* Both arrows, big enough to hit. `subcontrol-origin: border` keeps the field's padding
+   from eating into them. Height is deliberately left to Qt: pinning it left a dead strip
+   between the two buttons whenever the field was taller than their sum, and a click in
+   that strip did nothing at all. */
+QDoubleSpinBox::up-button, QSpinBox::up-button,
+QDoubleSpinBox::down-button, QSpinBox::down-button {{
+    subcontrol-origin: border;
+    width: {spin_button}px;
+    background: {BLUE["dark"]};
+    border-left: 1px solid {BLUE["mid"]};
+}}
+QDoubleSpinBox::up-button, QSpinBox::up-button {{
+    subcontrol-position: top right;
+    border-top-right-radius: 4px;
+}}
+QDoubleSpinBox::down-button, QSpinBox::down-button {{
+    subcontrol-position: bottom right;
+    border-top: 1px solid {BLUE["mid"]};
+    border-bottom-right-radius: 4px;
+}}
+QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{
+    background: {BLUE["highlight"]};
+}}
+QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{
+    image: url("{arrow_up}");
+    width: {spin_arrow}px;
+    height: {spin_arrow}px;
+}}
+QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{
+    image: url("{arrow_down}");
+    width: {spin_arrow}px;
+    height: {spin_arrow}px;
 }}
 QSlider::sub-page:horizontal {{ background: {BLUE["highlight"]}; }}
 

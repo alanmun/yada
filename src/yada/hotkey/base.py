@@ -197,3 +197,14 @@ class HotkeyBackend(Protocol):
     def status(self) -> str:
         """One line for the settings pane: is the shortcut actually live, and if not, why."""
         ...
+
+    def problem(self) -> str | None:
+        """The reason the shortcut is not live, or None when it is.
+
+        Separate from `status` because the caller needs to *decide* something -- whether to
+        tell the user at all -- and picking a failure out of a prose status line means
+        matching on wording. A shortcut that silently failed to register is
+        indistinguishable from a working one, which is how a broken hotkey survived to a
+        user saying "it does nothing, not even the start sound".
+        """
+        ...

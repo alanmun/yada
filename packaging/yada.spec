@@ -18,11 +18,25 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 ROOT = Path(SPECPATH).parent
 SRC = ROOT / "src"
 
-datas = [
-    # The two chimes. Without these the app runs but is silent, which is a confusing
-    # failure mode rather than an obvious one, so treat them as required.
-    (str(SRC / "yada" / "assets" / "sounds"), "yada/assets/sounds"),
-]
+# Every directory under src/yada/assets, because forgetting one ships a build that runs and
+# is quietly wrong. `icons` was missing from this list for ten releases: the checkbox tick
+# and the spin-box arrows are `image: url(...)` in the stylesheet, and Qt draws nothing at
+# all for a missing file -- so the tick simply did not exist in any released build, while
+# working perfectly from a source checkout. Enumerating the directory means the next asset
+# folder is included by existing.
+ASSET_ROOT = SRC / "yada" / "assets"
+_asset_dirs = sorted(p for p in ASSET_ROOT.iterdir() if p.is_dir())
+if not _asset_dirs:
+    raise SystemExit(f"no asset directories found under {ASSET_ROOT}")
+for _required in ("sounds", "icons"):
+    # Named explicitly as well: an empty or renamed directory would otherwise pass silently
+    # and produce a build that is silent, or one with invisible checkboxes.
+    if not (ASSET_ROOT / _required).is_dir():
+        raise SystemExit(f"required assets are missing: {ASSET_ROOT / _required}")
+    if not any((ASSET_ROOT / _required).iterdir()):
+        raise SystemExit(f"required assets directory is empty: {ASSET_ROOT / _required}")
+
+datas = [(str(d), f"yada/assets/{d.name}") for d in _asset_dirs]
 
 binaries = []
 

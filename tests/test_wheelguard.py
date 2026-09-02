@@ -114,8 +114,13 @@ def test_scrolling_over_an_unfocused_slider_does_not_change_it(qapp):
     assert slider.value() == 60, "chime volume must not drift when scrolling past it"
 
 
-def test_a_focused_control_still_responds(qapp):
-    """Deliberate adjustment with the wheel must keep working."""
+def test_even_a_focused_control_ignores_the_wheel(qapp):
+    """Focus is not an exemption.
+
+    It used to be, on the reasoning that clicking into a control first makes a wheel
+    adjustment deliberate. It does not: the control stays focused long after the user has
+    moved on, so scrolling the page still rewrote the value they had just set by hand.
+    """
     combo = QComboBox()
     combo.addItems(["one", "two", "three"])
     combo.setCurrentIndex(0)
@@ -127,7 +132,26 @@ def test_a_focused_control_still_responds(qapp):
         pytest.skip("this platform will not give focus to an offscreen widget")
 
     QApplication.sendEvent(combo, _wheel(combo))
-    assert combo.currentIndex() == 1, "a focused combo should still accept the wheel"
+    assert combo.currentIndex() == 0, "the wheel must not change a value, focused or not"
+
+
+def test_the_page_still_scrolls_when_the_wheel_is_taken(qapp):
+    """Swallowing the event would freeze the page under the pointer.
+
+    The whole point is that the scroll goes somewhere useful, so this asserts the page
+    actually moved rather than just that the control did not.
+    """
+    combo = QComboBox()
+    combo.addItems(["one", "two", "three"])
+    area = _page(qapp, combo)  # kept: it owns the widgets
+    bar = area.verticalScrollBar()
+    assert bar.maximum() > 0, "the page must be taller than the viewport for this to mean anything"
+    bar.setValue(0)
+    qapp.processEvents()
+
+    QApplication.sendEvent(combo, _wheel(combo))
+    qapp.processEvents()
+    assert bar.value() > 0, "the wheel should have scrolled the page instead"
 
 
 def test_scrollbars_keep_their_wheel(qapp):

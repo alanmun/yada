@@ -64,6 +64,27 @@ class TranscriptionCapabilities:
 The pipeline reads `capabilities()` and picks a path. `streaming=False` means the stream sink is
 never attached; the WAV buffer path is always present as the floor, so every provider works.
 
+**The realtime socket is opened with `?intent=transcription`, never `?model=`.** That
+parameter names a realtime *conversation* model (`gpt-realtime` and friends), so passing a
+transcription model to it is rejected with a 4000 `invalid_model` close frame. Two releases
+tried it first with `?intent=transcription` as a fallback, and the fallback could never run:
+the rejection arrives *after* the websocket handshake completes, so `connect()` returned
+successfully and stopped there. What the user saw was "Live transcription unavailable" mid
+recording, for a model that streams perfectly well.
+
+The lesson generalises, so `connect()` now waits for `session.updated` before reporting
+success. A handshake proves nothing about a session — the model and every field in
+`session.update` are validated afterwards — and a refusal has to be a *connection* failure
+for anything above it to fall back.
+
+**The batch floor is not universal after all.** Measured against the live API:
+`gpt-live-transcribe` answers `/v1/audio/transcriptions` with a bare HTTP 404, because it is
+realtime-only; `gpt-transcribe`, `gpt-4o-transcribe` and `whisper-1` all work on both. So a
+streaming failure on a realtime-only model leaves nothing to fall back to, and saying that
+beats reporting a 404 nobody can act on. Empty transcripts now carry the accumulated
+warnings for the same reason: "Transcription produced no text" on its own sent a user
+looking for a fault in a microphone that was working fine.
+
 ### Transformation
 
 Every interesting transform provider speaks OpenAI-compatible `/chat/completions`. So there is

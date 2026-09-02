@@ -234,7 +234,12 @@ class DictationSession:
 
             if not transcript:
                 self._reset()
-                self._deps.events.on_error("Transcription produced no text.")
+                # The warnings are the only record of *why* nothing came back -- a model
+                # that cannot do batch, a refused session, a provider error. Reporting
+                # "produced no text" on its own sent a user hunting through a working
+                # microphone for a fault that was in the request.
+                detail = " ".join(warnings).strip()
+                self._deps.events.on_error(f"Transcription produced no text. {detail}".strip())
                 return
 
             self._deps.chime(Stage.TRANSCRIPTION)
@@ -302,7 +307,7 @@ class DictationSession:
         try:
             result = await provider.transcribe(buffer.to_wav(), opts)
         except Exception as exc:  # noqa: BLE001
-            warnings.append(f"Transcription failed: {exc}")
+            warnings.append(_batch_failure_note(opts.model, exc))
             return "", False, warnings
         return result.text, False, warnings
 
@@ -359,3 +364,20 @@ class DictationSession:
             self._capture = None
         await self._abort_stream()
         self._reset()
+
+
+def _batch_failure_note(model: str, exc: Exception) -> str:
+    """Explain a failed batch transcription in terms of the cause, not the status code.
+
+    Some models are realtime-only: `gpt-live-transcribe` answers the batch endpoint with a
+    bare HTTP 404 "Invalid URL", which read as though yada had the wrong address. When live
+    transcription is also unavailable there is nothing left to try, and saying so beats
+    reporting a 404 the user cannot act on.
+    """
+    detail = str(exc)
+    if "404" in detail or "Invalid URL" in detail:
+        return (
+            f"{model} only works with live transcription, and the live connection was not "
+            "available, so there was nothing to fall back to."
+        )
+    return f"Transcription failed: {detail}"

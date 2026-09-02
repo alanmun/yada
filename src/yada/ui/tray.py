@@ -49,6 +49,9 @@ class TrayIcon(QObject):
         self._last_text: str | None = None
         self._update_ready: str | None = None
         self._status_line = "Ready"
+        # Set from settings once they are loaded; see app.py::_apply_notification_setting.
+        # Defaults to on so a notification is never lost before the setting is read.
+        self.notifications_enabled = True
 
         self._tray = QSystemTrayIcon(self._icons[SessionState.IDLE])
         self._tray.activated.connect(self._on_activated)
@@ -166,7 +169,13 @@ class TrayIcon(QObject):
 
         Success is signalled by the chime and the icon, not by a popup -- the point of this
         app is to not break the user's flow.
+
+        Gated here rather than at the call sites so the setting cannot be forgotten by the
+        next thing that wants to say something. When notifications are off the message
+        still reaches the tooltip and the settings pane; this only suppresses the toast.
         """
+        if not self.notifications_enabled:
+            return
         icon = (
             QSystemTrayIcon.MessageIcon.Warning
             if warning

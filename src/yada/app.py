@@ -179,6 +179,7 @@ class YadaApp(QObject):
             self.app.quit()
             return
         self.tray.show()
+        self._apply_notification_setting()
         self._start_hotkey()
 
         # Kick discovery and the update check after the UI is up, so neither delays the
@@ -379,6 +380,9 @@ class YadaApp(QObject):
         self._ipc = server
         return True
 
+    def _apply_notification_setting(self) -> None:
+        self.tray.notifications_enabled = self.settings.output.show_notifications
+
     def _start_hotkey(self) -> None:
         try:
             combo = Combo.parse(self.settings.hotkey.combo)
@@ -387,7 +391,7 @@ class YadaApp(QObject):
             combo = Combo.parse("ctrl+shift+;")
         self._hotkey = create_backend(self.settings.hotkey.backend, loop=self.loop)
         self._hotkey.start(combo, self.session.toggle)
-        self.tray.set_shortcut_label(combo.display)
+        self.tray.set_shortcut_label(self._shortcut_label())
 
     def _start_updates(self) -> None:
         service = UpdateService(
@@ -405,10 +409,19 @@ class YadaApp(QObject):
         return read_current() or __version__
 
     def _shortcut_label(self) -> str:
+        """What the tray tooltip says about the shortcut, including when it is not live.
+
+        The tooltip is the one place a problem can be reported without interrupting
+        anybody, which matters more now that notifications are off by default on Windows.
+        A registration that failed used to leave the tooltip advertising the shortcut as
+        though it worked.
+        """
         try:
-            return Combo.parse(self.settings.hotkey.combo).display
+            label = Combo.parse(self.settings.hotkey.combo).display
         except InvalidCombo:
-            return self.settings.hotkey.combo
+            label = self.settings.hotkey.combo
+        problem = self._hotkey.problem() if self._hotkey is not None else None
+        return f"{label} — not registered ({problem})" if problem else label
 
     # ==================================================================================
     # Providers
@@ -880,6 +893,7 @@ class YadaApp(QObject):
             self._start_hotkey()
 
         self._configure_chimes()
+        self._apply_notification_setting()
         if (
             new_settings.theme != old.theme
             or new_settings.text_scale != old.text_scale

@@ -100,6 +100,9 @@ class KdePortalHotkeyBackend:
             with contextlib.suppress(Exception):
                 fut.result(timeout=3.0)
 
+    def problem(self) -> str | None:
+        return self._error
+
     def status(self) -> str:
         combo = self._combo.display if self._combo else "shortcut"
         if self._error:

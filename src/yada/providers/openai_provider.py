@@ -180,34 +180,72 @@ class OpenAIRealtimeSession(StreamingSession):
         loop = asyncio.get_running_loop()
         self._final = loop.create_future()
 
-        # The docs show ?model= for realtime sessions; older transcription-only examples
-        # used ?intent=transcription. Try the documented form, fall back once. Whichever
-        # succeeds is recorded so the spike script can report it.
-        candidates = [
-            f"{REALTIME_URL}?model={self._opts.model}",
-            f"{REALTIME_URL}?intent=transcription",
-        ]
-        last: Exception | None = None
-        for url in candidates:
-            try:
-                self._ws = await websockets.connect(
-                    url,
-                    additional_headers=_auth_headers(self._api_key),
-                    max_size=None,
-                )
-                self._connected_url = url
-                break
-            except Exception as exc:  # noqa: BLE001 - handshake failures vary by version
-                last = exc
-        if self._ws is None:
+        # `?intent=transcription` is the only URL that opens a transcription session.
+        #
+        # Two releases tried `?model=<the transcription model>` first and it cannot work:
+        # that parameter names a realtime *conversation* model (gpt-realtime and friends),
+        # so the server rejects a transcription model with 4000 invalid_model. Worse, it
+        # rejects it *after* completing the websocket handshake -- so `connect()` returned
+        # successfully, the loop stopped there, and the `?intent=transcription` fallback
+        # underneath it never ran. What the user saw was "Live transcription unavailable"
+        # in the middle of a recording, for a model that streams perfectly well.
+        url = f"{REALTIME_URL}?intent=transcription"
+        try:
+            self._ws = await websockets.connect(
+                url,
+                additional_headers=_auth_headers(self._api_key),
+                max_size=None,
+            )
+        except Exception as exc:  # handshake failures vary by websockets version
             raise ProviderError(
-                f"Could not open a realtime transcription socket: {last}",
+                f"Could not open a realtime transcription socket: {exc}",
                 provider=PROVIDER,
                 retryable=True,
-            )
+            ) from exc
+        self._connected_url = url
 
         await self._ws.send(json.dumps(self._session_update()))
+        await self._await_session_ready()
         self._reader = asyncio.create_task(self._read_loop())
+
+    async def _await_session_ready(self, timeout: float = 10.0) -> None:
+        """Wait for the server to accept the session before treating the socket as usable.
+
+        A websocket handshake proves nothing about the session: the model and every field
+        in `session.update` are validated afterwards, and a rejection arrives as a close
+        frame. Confirming here is what makes a rejected session a *connection* failure the
+        caller can fall back from, instead of a socket that dies mid-recording.
+        """
+        assert self._ws is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                await self._close()
+                raise ProviderError(
+                    "The realtime transcription session was not confirmed in time.",
+                    provider=PROVIDER,
+                    retryable=True,
+                )
+            try:
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=remaining)
+            except Exception as exc:  # closed, timed out, or malformed
+                await self._close()
+                raise ProviderError(
+                    f"The realtime transcription session was refused: {exc}",
+                    provider=PROVIDER,
+                    retryable=True,
+                ) from exc
+            event = json.loads(raw)
+            kind = event.get("type", "")
+            if kind in ("session.updated", "transcription_session.updated"):
+                return
+            if kind == "error":
+                detail = event.get("error", {}).get("message", "the session was rejected")
+                await self._close()
+                raise ProviderError(detail, provider=PROVIDER, retryable=True)
+            # `session.created` and anything else informational: keep waiting.
 
     async def _read_loop(self) -> None:
         assert self._ws is not None
@@ -231,8 +269,9 @@ class OpenAIRealtimeSession(StreamingSession):
         except Exception as exc:  # noqa: BLE001
             if self._final and not self._final.done():
                 self._final.set_exception(
-                    ProviderError(f"Realtime socket closed: {exc}", provider=PROVIDER,
-                                  retryable=True)
+                    ProviderError(
+                        f"Realtime socket closed: {exc}", provider=PROVIDER, retryable=True
+                    )
                 )
             await self._deltas.put(None)
 
@@ -399,8 +438,7 @@ class OpenAITransform(_OpenAIBase):
                 supports_reasoning=row["id"].startswith(("gpt-5", "o1", "o3", "o4")),
             )
             for row in await self._raw_models()
-            if not _is_transcription_model(row["id"])
-            and self._looks_like_chat_model(row["id"])
+            if not _is_transcription_model(row["id"]) and self._looks_like_chat_model(row["id"])
         ]
         return sorted(models, key=lambda m: m.sort_key)
 
@@ -481,9 +519,7 @@ class OpenAITransform(_OpenAIBase):
         # 401/429/500 and unrelated 400s say nothing about the parameter itself.
         return Support.UNKNOWN, f"HTTP {resp.status_code}: {detail}"[:160]
 
-    async def transform(
-        self, system: str, user: str, opts: TransformOptions
-    ) -> TransformResult:
+    async def transform(self, system: str, user: str, opts: TransformOptions) -> TransformResult:
         async with self._client() as client:
             resp = await client.post("/responses", json=self._payload(system, user, opts))
         if resp.status_code >= 400:

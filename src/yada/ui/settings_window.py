@@ -420,7 +420,7 @@ class SettingsWindow(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        self.tf_enabled = QCheckBox("Run an AI cleanup pass after transcription")
+        self.tf_enabled = QCheckBox("Enable transforms after each transcribe job completes")
         self.tf_enabled.toggled.connect(self._on_transform_toggled)
         layout.addWidget(self.tf_enabled)
         layout.addWidget(
@@ -729,6 +729,19 @@ class SettingsWindow(QWidget):
         paste_layout.addWidget(hint(backend.describe()))
         layout.addWidget(paste_box)
 
+        notice_box = QGroupBox("Notifications")
+        notice_layout = QVBoxLayout(notice_box)
+        self.show_notifications = QCheckBox("Show desktop notifications for problems")
+        notice_layout.addWidget(self.show_notifications)
+        notice_layout.addWidget(
+            hint(
+                "Off by default on Windows, where these arrive as toasts in the corner of "
+                "the screen. Warnings and errors still appear on the tray icon's tooltip "
+                "and in this window either way."
+            )
+        )
+        layout.addWidget(notice_box)
+
         chime_box = QGroupBox("Chimes")
         chime_layout = QVBoxLayout(chime_box)
 
@@ -891,6 +904,7 @@ class SettingsWindow(QWidget):
         self.current_version_label.setText(_running_version())
         self._select(self.paste_mode, s.output.paste_mode)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
+        self.show_notifications.setChecked(s.output.show_notifications)
         self.chime_listening.set_enabled_state(s.output.chime_on_listening)
         self.chime_transcription.set_enabled_state(s.output.chime_on_transcription)
         self.chime_transformation.set_enabled_state(s.output.chime_on_transformation)
@@ -951,6 +965,7 @@ class SettingsWindow(QWidget):
         s.updates_enabled = self.update_enabled.isChecked()
         s.output.paste_mode = self.paste_mode.currentData() or "off"
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
+        s.output.show_notifications = self.show_notifications.isChecked()
         s.output.chime_on_listening = self.chime_listening.is_enabled()
         s.output.chime_on_transcription = self.chime_transcription.is_enabled()
         s.output.chime_on_transformation = self.chime_transformation.is_enabled()
