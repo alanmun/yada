@@ -140,3 +140,105 @@ def test_a_rejected_session_fails_connect_rather_than_the_recording(monkeypatch)
     session = OpenAIRealtimeSession("sk-test", TranscribeOptions(model="nope"))
     with pytest.raises(ProviderError, match="invalid_model"):
         asyncio.run(session.connect())
+
+
+# --------------------------------------------------------------------------------------
+# Model-dependent session fields
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _forget_unsupported_fields():
+    """The memo is module state, so tests must not inherit each other's learning."""
+    from yada.providers import openai_provider
+
+    openai_provider._UNSUPPORTED_FIELDS.clear()
+    yield
+    openai_provider._UNSUPPORTED_FIELDS.clear()
+
+
+class _ScriptedSocket:
+    """Answers the session.update with whatever the script says next."""
+
+    def __init__(self, replies: list[str], log: list[dict]) -> None:
+        self._replies = list(replies)
+        self._log = log
+        self.closed = False
+
+    async def send(self, payload: str) -> None:
+        import json
+
+        self._log.append(json.loads(payload))
+
+    async def recv(self) -> str:
+        return self._replies.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_a_refused_field_is_dropped_and_the_session_retried(monkeypatch):
+    """`delay` and `keywords` are model-dependent, and a refusal kills the whole session.
+
+    Measured against the live API: gpt-transcribe and gpt-4o-transcribe refuse `delay`,
+    gpt-realtime-whisper refuses `keywords`. yada sent whatever was configured, so simply
+    choosing one of those models turned live transcription off, citing a parameter the user
+    never set and cannot see.
+    """
+    import asyncio
+
+    from yada.providers import openai_provider
+
+    sent: list[dict] = []
+    refusal = (
+        '{"type": "error", "error": {"message": '
+        '"The \'delay\' parameter is not supported for this model."}}'
+    )
+    sockets = [
+        _ScriptedSocket([refusal], sent),
+        _ScriptedSocket(['{"type": "session.updated"}'], sent),
+    ]
+
+    class FakeWebsockets:
+        async def connect(self, url, **_kwargs):
+            return sockets.pop(0)
+
+    monkeypatch.setitem(sys.modules, "websockets", FakeWebsockets())
+
+    opts = TranscribeOptions(model="picky-model", delay="minimal", keywords=("yada",))
+    session = openai_provider.OpenAIRealtimeSession("sk-test", opts)
+    asyncio.run(session.connect())
+
+    assert len(sent) == 2, "it must retry rather than give up"
+    assert sent[0]["session"]["audio"]["input"]["transcription"]["delay"] == "minimal"
+    retried = sent[1]["session"]["audio"]["input"]["transcription"]
+    assert "delay" not in retried, "the refused field must be dropped"
+    assert retried["keywords"] == ["yada"], "only the refused field goes"
+    assert openai_provider._UNSUPPORTED_FIELDS["picky-model"] == {"delay"}
+
+
+def test_an_unrelated_error_is_not_retried_as_a_field_problem(monkeypatch):
+    """Only a named optional field is worth dropping; anything else is a real failure."""
+    import asyncio
+
+    from yada.providers import openai_provider
+    from yada.providers.base import ProviderError
+
+    sent: list[dict] = []
+    socket = _ScriptedSocket(
+        ['{"type": "error", "error": {"message": "invalid_model"}}'], sent
+    )
+
+    class FakeWebsockets:
+        async def connect(self, url, **_kwargs):
+            return socket
+
+    monkeypatch.setitem(sys.modules, "websockets", FakeWebsockets())
+
+    session = openai_provider.OpenAIRealtimeSession(
+        "sk-test", TranscribeOptions(model="nope", delay="minimal")
+    )
+    with pytest.raises(ProviderError, match="invalid_model"):
+        asyncio.run(session.connect())
+    assert len(sent) == 1, "no retry for an error that is not about a field"
+    assert openai_provider._UNSUPPORTED_FIELDS == {}

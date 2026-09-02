@@ -107,6 +107,13 @@ class EventBridge(QObject):
     # thread, and touching a QLabel from there is undefined -- in practice the update was
     # simply discarded, so pressing Test appeared to do nothing at all.
     provider_test_result = Signal(str, str)
+    # Clipboard write plus the paste keystroke. Also must be a signal, and this one was
+    # worse than a discarded update: Qt's Windows clipboard is OLE-based and requires the
+    # GUI thread, so calling it from the asyncio thread blocked forever. The text reached
+    # the clipboard and the read-back never returned, inside the lock the session holds
+    # while finishing -- so the state stayed on "Transcribing…" indefinitely and nothing
+    # was ever pasted.
+    deliver_requested = Signal(str, object)
 
     def on_state(self, state: SessionState) -> None:
         self.state.emit(state)
@@ -151,7 +158,7 @@ class YadaApp(QObject):
                 transformer=self._build_transformer,
                 events=self.bridge,
                 chime=self._chime,
-                deliver=self._deliver,
+                deliver=self.bridge.deliver_requested.emit,
             ),
         )
 
@@ -356,6 +363,9 @@ class YadaApp(QObject):
             self.show_settings, Qt.ConnectionType.QueuedConnection
         )
         self.bridge.quit_requested.connect(self.quit, Qt.ConnectionType.QueuedConnection)
+        self.bridge.deliver_requested.connect(
+            self._deliver, Qt.ConnectionType.QueuedConnection
+        )
         self.bridge.provider_test_result.connect(
             self._on_provider_test_result, Qt.ConnectionType.QueuedConnection
         )
@@ -771,7 +781,13 @@ class YadaApp(QObject):
 
     def _deliver(self, text: str, _stage: Stage) -> None:
         """Clipboard first, then the keystroke. Order matters: if pasting fails, the text is
-        still on the clipboard and one Ctrl+V away."""
+        still on the clipboard and one Ctrl+V away.
+
+        Runs on the Qt thread via `deliver_requested`, never called directly. Both halves
+        need it: Qt's clipboard is GUI-thread-only, and SendInput targets the foreground
+        window rather than a thread but has no business being called from the event loop
+        that is also feeding audio.
+        """
         ok, error = copy(text)
         if not ok:
             self.bridge.warning.emit(f"Could not copy to the clipboard: {error}")

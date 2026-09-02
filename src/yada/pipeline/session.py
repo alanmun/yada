@@ -91,6 +91,10 @@ class SessionDeps:
 # connect, short enough that a dead network does not hold the transcript hostage.
 STREAM_CONNECT_GRACE = 3.0
 
+# How long to let queued audio finish uploading before committing. A backlog builds while
+# the socket opens, so this covers sending it rather than just the last chunk.
+UPLOAD_DRAIN_TIMEOUT = 30.0
+
 
 class DictationSession:
     def __init__(self, loop: asyncio.AbstractEventLoop, deps: SessionDeps) -> None:
@@ -129,7 +133,15 @@ class DictationSession:
         if self._state is SessionState.IDLE:
             await self._start()
         elif self._state is SessionState.RECORDING:
-            await self._stop_and_process()
+            try:
+                await self._stop_and_process()
+            except Exception as exc:  # noqa: BLE001 - the app must stay usable regardless
+                # Without this the session stays on TRANSCRIBING for good: every later
+                # keypress is answered with "Still finishing the last dictation…" and the
+                # only way out is to restart yada. One lost dictation is the right price.
+                await self._abort_stream()
+                self._reset()
+                self._deps.events.on_error(f"Dictation failed: {exc}")
         else:
             # Ignoring rather than queueing: starting a second recording while the first is
             # still being transcribed would need two independent pipelines, and the wait is
@@ -341,8 +353,18 @@ class DictationSession:
         if self._stream_sink is not None and self._stream_session is not None:
             self._stream_sink.flush()
             if self._pump is not None:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(self._pump, timeout=10.0)
+                # Committing before the queued audio has finished uploading transcribes
+                # only what arrived, which reads as the model mishearing rather than as
+                # missing audio -- so a timeout here says so instead of passing silently.
+                try:
+                    await asyncio.wait_for(self._pump, timeout=UPLOAD_DRAIN_TIMEOUT)
+                except TimeoutError:
+                    warnings.append(
+                        "Some audio had not finished uploading, so the transcript may be "
+                        "cut short."
+                    )
+                except Exception:  # noqa: BLE001 - a dead pump is handled by finish()
+                    pass
             if self._stream_sink.dropped_chunks:
                 warnings.append(
                     f"{self._stream_sink.dropped_chunks} audio chunks were dropped from the "

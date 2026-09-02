@@ -17,6 +17,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from types import MappingProxyType
 from typing import ClassVar
@@ -44,6 +45,38 @@ from .base import (
 API_BASE = "https://api.openai.com/v1"
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
 PROVIDER = "openai"
+
+# Which optional session fields a given model has refused, learned at runtime.
+#
+# `delay` and `keywords` are both model-dependent, and a model that does not support one
+# does not ignore it -- it rejects the whole session. Measured against the live API:
+# gpt-transcribe, gpt-4o-transcribe and gpt-4o-mini-transcribe all refuse `delay`, and
+# gpt-realtime-whisper refuses `keywords`. Since yada sent whatever was configured, simply
+# choosing one of those models turned live transcription off with an error that named a
+# parameter the user never set.
+#
+# /v1/models exposes no capabilities, so this cannot be known in advance. It is learned
+# from the refusal, dropped, and retried -- which keeps working when the next model arrives
+# with a different set. Process-lifetime only: cheap to relearn, and it must not outlive a
+# provider changing its mind.
+_UNSUPPORTED_FIELDS: dict[str, set[str]] = {}
+
+# "The 'delay' parameter is not supported for this model."
+_UNSUPPORTED_RE = re.compile(r"'([A-Za-z_][A-Za-z0-9_]*)'\s+parameter is not supported", re.I)
+
+# Optional session fields, in the order it is least painful to lose them.
+_OPTIONAL_SESSION_FIELDS = ("delay", "keywords", "languages", "prompt")
+
+# One retry per optional field, plus one to spare.
+_MAX_FIELD_RETRIES = len(_OPTIONAL_SESSION_FIELDS) + 1
+
+
+class _UnsupportedField(ProviderError):
+    """The server refused one named field. Retryable by dropping it."""
+
+    def __init__(self, field: str, detail: str) -> None:
+        super().__init__(detail, provider=PROVIDER, retryable=True)
+        self.field = field
 
 # Preference ordering for auto-selected models. Discovery still returns everything; this
 # only decides what "" (auto) resolves to and what sorts first in the picker. Names, not
@@ -145,16 +178,17 @@ class OpenAIRealtimeSession(StreamingSession):
     # -- session config -----------------------------------------------------------------
 
     def _session_update(self) -> dict:
+        refused = _UNSUPPORTED_FIELDS.get(self._opts.model, frozenset())
         transcription: dict[str, object] = {"model": self._opts.model}
         # `keywords` is a first-class field for literal terms -- product names, acronyms,
         # proper nouns. Strictly better than stuffing spellings into the prompt.
-        if self._opts.keywords:
+        if self._opts.keywords and "keywords" not in refused:
             transcription["keywords"] = list(self._opts.keywords)
-        if self._opts.prompt:
+        if self._opts.prompt and "prompt" not in refused:
             transcription["prompt"] = self._opts.prompt
-        if self._opts.languages:
+        if self._opts.languages and "languages" not in refused:
             transcription["languages"] = list(self._opts.languages)
-        if self._opts.delay:
+        if self._opts.delay and "delay" not in refused:
             transcription["delay"] = self._opts.delay
         return {
             "type": "session.update",
@@ -190,23 +224,39 @@ class OpenAIRealtimeSession(StreamingSession):
         # underneath it never ran. What the user saw was "Live transcription unavailable"
         # in the middle of a recording, for a model that streams perfectly well.
         url = f"{REALTIME_URL}?intent=transcription"
-        try:
-            self._ws = await websockets.connect(
-                url,
-                additional_headers=_auth_headers(self._api_key),
-                max_size=None,
-            )
-        except Exception as exc:  # handshake failures vary by websockets version
-            raise ProviderError(
-                f"Could not open a realtime transcription socket: {exc}",
-                provider=PROVIDER,
-                retryable=True,
-            ) from exc
-        self._connected_url = url
+        for attempt in range(_MAX_FIELD_RETRIES):
+            try:
+                self._ws = await websockets.connect(
+                    url,
+                    additional_headers=_auth_headers(self._api_key),
+                    max_size=None,
+                )
+            except Exception as exc:  # handshake failures vary by websockets version
+                raise ProviderError(
+                    f"Could not open a realtime transcription socket: {exc}",
+                    provider=PROVIDER,
+                    retryable=True,
+                ) from exc
+            self._connected_url = url
 
-        await self._ws.send(json.dumps(self._session_update()))
-        await self._await_session_ready()
-        self._reader = asyncio.create_task(self._read_loop())
+            await self._ws.send(json.dumps(self._session_update()))
+            try:
+                await self._await_session_ready()
+            except _UnsupportedField as exc:
+                # Drop the field and try again rather than giving up on live transcription
+                # for a parameter the user cannot see and did not ask for. Remembered, so
+                # the rest of this run pays nothing.
+                _UNSUPPORTED_FIELDS.setdefault(self._opts.model, set()).add(exc.field)
+                if attempt == _MAX_FIELD_RETRIES - 1:
+                    raise
+                continue
+            self._reader = asyncio.create_task(self._read_loop())
+            return
+        raise ProviderError(  # pragma: no cover - the loop always returns or raises
+            "Could not agree a realtime transcription session.",
+            provider=PROVIDER,
+            retryable=True,
+        )
 
     async def _await_session_ready(self, timeout: float = 10.0) -> None:
         """Wait for the server to accept the session before treating the socket as usable.
@@ -244,6 +294,10 @@ class OpenAIRealtimeSession(StreamingSession):
             if kind == "error":
                 detail = event.get("error", {}).get("message", "the session was rejected")
                 await self._close()
+                if (match := _UNSUPPORTED_RE.search(detail)) and match.group(1) in (
+                    _OPTIONAL_SESSION_FIELDS
+                ):
+                    raise _UnsupportedField(match.group(1), detail)
                 raise ProviderError(detail, provider=PROVIDER, retryable=True)
             # `session.created` and anything else informational: keep waiting.
 

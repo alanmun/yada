@@ -77,6 +77,17 @@ success. A handshake proves nothing about a session — the model and every fiel
 `session.update` are validated afterwards — and a refusal has to be a *connection* failure
 for anything above it to fall back.
 
+**Optional session fields are model-dependent, and a refusal is fatal to the session.**
+Measured against the live API: `gpt-transcribe`, `gpt-4o-transcribe` and
+`gpt-4o-mini-transcribe` refuse `delay`; `gpt-realtime-whisper` and the `gpt-4o-*` pair
+refuse `keywords`. A model that does not support a field does not ignore it — it rejects
+the whole `session.update`, so choosing one of those models simply turned live
+transcription off, citing a parameter the user never set. `/v1/models` exposes no
+capabilities, so this cannot be known in advance: the refusal names the field, so it is
+dropped, remembered for the process, and the session retried. All five models connect that
+way, each losing only what it actually refuses. Relearned each run on purpose — it must not
+outlive a provider changing its mind.
+
 **The batch floor is not universal after all.** Measured against the live API:
 `gpt-live-transcribe` answers `/v1/audio/transcriptions` with a bare HTTP 404, because it is
 realtime-only; `gpt-transcribe`, `gpt-4o-transcribe` and `whisper-1` all work on both. So a

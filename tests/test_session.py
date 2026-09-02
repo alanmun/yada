@@ -565,3 +565,38 @@ async def test_a_failed_connect_stops_queueing_audio(fake_audio):
     assert not any("dropped" in w for w in rec.finished[0].warnings), (
         "a stream that never opened must not report dropped audio"
     )
+
+
+async def test_a_failure_while_delivering_does_not_wedge_the_session(fake_audio):
+    """Any failure in the stop path has to return the app to a usable state.
+
+    A hang in delivery -- Qt's clipboard called from the asyncio thread, which is what
+    happened -- left the session on TRANSCRIBING permanently. Every later keypress was
+    answered with "Still finishing the last dictation…" and restarting yada was the only
+    way out. One lost dictation is the right price for a bug here.
+    """
+    settings = Settings()
+    settings.output.paste_mode = "after_transcription"
+    sess, rec, _ = build(settings=settings, transcriber=FakeTranscriber(batch_text="hello"))
+
+    def explode(_text, _stage):
+        raise RuntimeError("clipboard is wedged")
+
+    sess._deps = type(sess._deps)(
+        settings=sess._deps.settings,
+        transcriber=sess._deps.transcriber,
+        transformer=sess._deps.transformer,
+        events=rec,
+        chime=rec.chimes.append,
+        deliver=explode,
+    )
+
+    await sess.toggle_async()
+    await sess.toggle_async()
+
+    assert sess.state is SessionState.IDLE, "the session must recover, not stay busy"
+    assert any("clipboard is wedged" in e for e in rec.errors)
+
+    # And it can be used again immediately.
+    await sess.toggle_async()
+    assert sess.state is SessionState.RECORDING
