@@ -214,6 +214,10 @@ async def test_no_provider_configured_is_reported_not_crashed():
     await sess.toggle_async()
     assert sess.state is SessionState.IDLE
     assert "No transcription provider" in rec.errors[0]
+    # Tagged so the app can open Settings rather than rely on a tray notification the
+    # user may never see -- Windows 11 hides new tray icons behind the overflow arrow.
+    assert rec.errors[0].startswith("NOT_CONFIGURED: ")
+    assert rec.chimes == [], "nothing was recorded, so nothing should chime"
 
 
 async def test_microphone_failure_is_reported(fake_audio, monkeypatch):
@@ -237,6 +241,7 @@ async def test_empty_recording_makes_no_api_call(fake_audio):
     sess._buffer.clear()
     await sess.toggle_async()
     assert stt.batch_calls == 0, "a zero-length recording must not be uploaded"
+    assert rec.chimes == [Stage.LISTENING], "it did start listening, so that chime is right"
     assert "Nothing was recorded" in rec.warnings[0]
     assert sess.state is SessionState.IDLE
 
@@ -338,14 +343,26 @@ async def test_wav_payload_is_a_real_wav(fake_audio):
 # --------------------------------------------------------------------------------------
 
 
-async def test_one_chime_when_no_transform(fake_audio):
+async def test_listening_chime_fires_the_moment_recording_starts(fake_audio):
+    """The only confirmation the shortcut fired at all.
+
+    Without it, pressing the shortcut produced no feedback until transcription finished --
+    and none ever if anything was misconfigured, which is indistinguishable from a
+    shortcut that never registered.
+    """
+    sess, rec, _ = build(transcriber=FakeTranscriber())
+    await sess.toggle_async()
+    assert rec.chimes == [Stage.LISTENING], "must chime on start, before anything else"
+
+
+async def test_two_chimes_when_no_transform(fake_audio):
     sess, rec, _ = build(transcriber=FakeTranscriber())
     await sess.toggle_async()
     await sess.toggle_async()
-    assert rec.chimes == [Stage.TRANSCRIPTION]
+    assert rec.chimes == [Stage.LISTENING, Stage.TRANSCRIPTION]
 
 
-async def test_two_chimes_when_transform_runs(fake_audio):
+async def test_three_chimes_when_transform_runs(fake_audio):
     settings = Settings()
     settings.transform.enabled = True
     settings.transform.steps = [TransformStep(type="prompt_transform")]
@@ -354,7 +371,7 @@ async def test_two_chimes_when_transform_runs(fake_audio):
     )
     await sess.toggle_async()
     await sess.toggle_async()
-    assert rec.chimes == [Stage.TRANSCRIPTION, Stage.TRANSFORMATION]
+    assert rec.chimes == [Stage.LISTENING, Stage.TRANSCRIPTION, Stage.TRANSFORMATION]
     assert rec.finished[0].final_text == "TRANSFORMED"
     assert rec.finished[0].transcript == "batch text"
 
@@ -374,7 +391,7 @@ async def test_transform_failure_still_yields_transcript(fake_audio):
     assert result.final_text == "batch text", "a failed cleanup must not lose the words"
     assert any("500 server error" in w for w in result.warnings)
     # The transform chime still fires: the stage completed, just unsuccessfully.
-    assert rec.chimes == [Stage.TRANSCRIPTION, Stage.TRANSFORMATION]
+    assert rec.chimes == [Stage.LISTENING, Stage.TRANSCRIPTION, Stage.TRANSFORMATION]
 
 
 async def test_no_paste_by_default(fake_audio):

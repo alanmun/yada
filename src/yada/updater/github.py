@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import os
 import shutil
@@ -364,14 +365,44 @@ def extract_release(archive: Path, version: str) -> Path:
 
 
 def _flatten_single_dir(target: Path) -> None:
-    """Collapse an archive that wraps everything in one top-level folder."""
+    """Collapse an archive that wraps everything in one top-level folder.
+
+    Renaming that folder aside first is not tidiness, it is required. yada's archives put
+    everything under `yada/`, and on Linux the executable inside is also called `yada` --
+    so moving it to `target/yada` names the very directory being emptied. shutil.move
+    then tries to move the file *into* it and fails with "Destination path already
+    exists", which broke every Linux update. On Windows the executable is `yada.exe`, so
+    the collision never happened there and the bug hid.
+    """
     entries = [p for p in target.iterdir() if p.name != ".complete"]
     if len(entries) != 1 or not entries[0].is_dir():
         return
     inner = entries[0]
-    for item in list(inner.iterdir()):
-        shutil.move(str(item), str(target / item.name))
-    inner.rmdir()
+
+    holding = target / f".unwrap-{os.getpid()}"
+    try:
+        inner.rename(holding)
+    except OSError as exc:
+        raise UpdateError(f"could not unwrap {inner.name}: {exc}") from exc
+
+    for item in sorted(holding.iterdir()):
+        destination = target / item.name
+        try:
+            shutil.move(str(item), str(destination))
+        except FileNotFoundError as exc:
+            # The listing was taken a moment ago. A file disappearing between then and now
+            # means something else deleted it -- on Windows, antivirus removing a file it
+            # dislikes from the freshly extracted archive. Continuing would install a
+            # release with pieces missing.
+            raise UpdateError(
+                f"{item.name} disappeared while unpacking the release. Antivirus software "
+                "may have removed it; check your security software's protection history."
+            ) from exc
+        except OSError as exc:
+            raise UpdateError(f"could not unpack {item.name}: {exc}") from exc
+
+    with contextlib.suppress(OSError):
+        holding.rmdir()
 
 
 def clear_staging() -> None:

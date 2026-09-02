@@ -46,6 +46,10 @@ class SessionState(StrEnum):
 
 
 class Stage(StrEnum):
+    # Fires the moment recording starts. Without it, pressing the shortcut produced no
+    # feedback at all until transcription finished -- and if anything was misconfigured,
+    # no feedback ever, which is indistinguishable from a shortcut that is not registered.
+    LISTENING = "listening"
     TRANSCRIPTION = "transcription"
     TRANSFORMATION = "transformation"
 
@@ -130,8 +134,13 @@ class DictationSession:
         settings = self._deps.settings()
         configured = self._deps.transcriber()
         if configured is None:
+            # Prefixed so the app can recognise this specific case and open Settings. A
+            # tray notification is useless here: Windows 11 hides new tray icons behind
+            # the overflow arrow, so pressing the shortcut looked like it did nothing at
+            # all -- which is exactly how it was reported.
             self._deps.events.on_error(
-                "No transcription provider is configured. Add an API key in Settings."
+                "NOT_CONFIGURED: No transcription provider is configured yet. "
+                "Add an API key on the Providers tab."
             )
             return
         provider, opts = configured
@@ -163,6 +172,9 @@ class DictationSession:
 
         self._started_at = time.monotonic()
         self._set_state(SessionState.RECORDING)
+        # After the microphone is actually open, so the chime means "listening", not
+        # "tried to listen".
+        self._deps.chime(Stage.LISTENING)
 
     async def _try_open_stream(
         self, provider: TranscriptionProvider, opts: TranscribeOptions

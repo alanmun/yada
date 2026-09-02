@@ -69,11 +69,13 @@ class Sound:
 
 BUILTINS: dict[str, str] = {
     # id suffix -> display name
+    "listening": "Single tap (built-in)",
     "transcription": "Rising chime (built-in)",
     "transformation": "Falling chime (built-in)",
 }
 
 DEFAULT_FOR_STAGE: dict[Stage, str] = {
+    Stage.LISTENING: f"{BUILTIN_PREFIX}listening",
     Stage.TRANSCRIPTION: f"{BUILTIN_PREFIX}transcription",
     Stage.TRANSFORMATION: f"{BUILTIN_PREFIX}transformation",
 }

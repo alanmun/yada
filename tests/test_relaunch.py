@@ -162,3 +162,43 @@ def test_managed_install_ignores_the_payload_override(install, monkeypatch, tmp_
     assert selfinstall.is_managed_install() is True, (
         "the override must not make an installed copy look uninstalled"
     )
+
+
+def test_an_extracted_archive_installs_even_when_a_copy_is_running(install, monkeypatch):
+    """Double-clicking a newly downloaded yada.exe must install it.
+
+    main() checked "is an instance already running" before "am I an uninstalled archive",
+    so a fresh 0.1.8 executable found the running 0.1.7, forwarded a settings command to
+    it and exited. The new version appeared to do nothing.
+    """
+    from yada import __main__ as entry
+
+    calls: list[str] = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(entry, "_install", lambda: calls.append("install") or 0)
+    monkeypatch.setattr("yada.selfinstall.is_managed_install", lambda: False)
+    # An older copy is running and answering.
+    monkeypatch.setattr("yada.ipc.is_running", lambda: True)
+    monkeypatch.setattr(
+        "yada.ipc.send_command", lambda *a, **k: calls.append("forwarded") or {"ok": True}
+    )
+
+    assert entry.main([]) == 0
+    assert calls == ["install"], f"expected an install, got {calls}"
+
+
+def test_an_installed_copy_forwards_to_the_running_instance(install, monkeypatch):
+    """The other half: once installed, a bare launch must not start a second copy."""
+    from yada import __main__ as entry
+
+    calls: list[str] = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(entry, "_install", lambda: calls.append("install") or 0)
+    monkeypatch.setattr("yada.selfinstall.is_managed_install", lambda: True)
+    monkeypatch.setattr("yada.ipc.is_running", lambda: True)
+    monkeypatch.setattr(
+        "yada.ipc.send_command", lambda *a, **k: calls.append("forwarded") or {"ok": True}
+    )
+
+    assert entry.main([]) == 0
+    assert calls == ["forwarded"]

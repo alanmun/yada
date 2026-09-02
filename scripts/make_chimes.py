@@ -71,6 +71,10 @@ def write(path: Path, samples: np.ndarray) -> None:
 
 def main() -> None:
     print("Writing chimes:")
+    # Listening: a single short low-to-mid tap. Deliberately the plainest of the three --
+    # it fires every time you start talking, so it must not be a fanfare. Distinct from
+    # the other two by being one note rather than two.
+    write(ASSETS / "listening.wav", sequence([(880.00, 0.13, 0.0)]))
     # Transcription: rising perfect fifth (E6 -> B6). Reads as "here it is".
     write(
         ASSETS / "transcription.wav",

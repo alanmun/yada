@@ -500,3 +500,56 @@ def test_an_interrupted_extraction_is_not_mistaken_for_a_release(install_root):
     core.write_current("0.1.5")
     core.prune_old_versions()
     assert not leftover.exists(), "pruning clears abandoned extractions"
+
+
+def test_unwraps_an_archive_whose_top_folder_matches_the_executable(install_root, tmp_path):
+    """yada's own archives are exactly this shape, and it broke every Linux update.
+
+    Everything sits under `yada/`, and on Linux the executable inside is also `yada`, so
+    flattening moved the file onto the path of the directory being emptied. Windows was
+    unaffected because its executable is `yada.exe`, which is why this survived several
+    releases.
+    """
+    stage = tmp_path / "yada"  # top-level folder named the same as the executable
+    stage.mkdir()
+    (stage / core.executable_name()).write_text("#!/bin/sh\n")
+    (stage / "_internal").mkdir()
+    (stage / "_internal" / "payload.bin").write_bytes(b"\x00" * 32)
+    (stage / "VERSION").write_text("7.7.7\n")
+
+    archive = tmp_path / "yada-7.7.7.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(stage, arcname="yada")
+
+    target = github.extract_release(archive, "7.7.7")
+
+    assert (target / core.executable_name()).is_file(), "the executable must be a file"
+    assert (target / "_internal" / "payload.bin").exists()
+    assert (target / "VERSION").exists()
+    assert not (target / "yada" / "yada").exists(), "the wrapper folder must be gone"
+    assert (target / ".complete").exists()
+
+
+def test_a_file_vanishing_mid_unpack_is_reported_as_such(install_root, tmp_path, monkeypatch):
+    """Antivirus deleting a file out of the extracted archive must say so.
+
+    This surfaced as a bare '[Errno 2] No such file or directory' with nothing to act on.
+    """
+    stage = tmp_path / "yada"
+    stage.mkdir()
+    (stage / core.executable_name()).write_text("#!/bin/sh\n")
+    (stage / "SOMETHING.bin").write_bytes(b"x")
+    archive = tmp_path / "yada-7.7.8.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(stage, arcname="yada")
+
+    real_move = github.shutil.move
+
+    def move_but_lose_one(src, dst, *a, **k):
+        if src.endswith("SOMETHING.bin"):
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_move(src, dst, *a, **k)
+
+    monkeypatch.setattr(github.shutil, "move", move_but_lose_one)
+    with pytest.raises(github.UpdateError, match="Antivirus"):
+        github.extract_release(archive, "7.7.8")

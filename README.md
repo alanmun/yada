@@ -30,8 +30,9 @@ through an app nobody has updated. yada is built around avoiding exactly that.
 - **Global shortcut** — press once to start, once to stop. Works from anywhere.
 - **Live transcription** — with OpenAI, audio streams while you speak, so the text is ready
   the instant you stop. Providers without a live connection transcribe after you stop.
-- **Two-stage pipeline** — transcription, then an optional LLM cleanup pass. A distinct chime
-  for each, so you can tell them apart without looking.
+- **Two-stage pipeline** — transcription, then an optional LLM cleanup pass. Three distinct
+  chimes — one when yada starts listening, one when the transcript lands, one when the
+  cleanup finishes — so you always know where you are without looking.
 - **A vocabulary that actually works** — your names and jargon are sent as *literal vocabulary
   hints* to the transcription model, fixing spelling while it is still listening rather than
   patching it afterwards.

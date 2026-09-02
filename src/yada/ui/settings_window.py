@@ -66,6 +66,14 @@ PASTE_MODES = [
 ]
 
 
+def _short_version() -> str:
+    """Just the version number, for the title bar."""
+    from .. import __version__
+    from ..updater import read_current
+
+    return read_current() or __version__
+
+
 def _running_version() -> str:
     """What is actually running, which is not always what the source says.
 
@@ -101,7 +109,10 @@ class SettingsWindow(QWidget):
 
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("yada settings")
+        # Just the name and version. Qt appends applicationDisplayName to window titles,
+        # so "yada settings" rendered as "yada settings - yada"; the display name is left
+        # unset in app.py so this is the whole title.
+        self.setWindowTitle(f"yada v{_short_version()}")
         # Scaled with the text, capped to the screen: at double size the tab bar overflows
         # a fixed 760px window.
         scale = max(1.0, min(2.0, float(getattr(settings, "text_scale", 1.0))))
@@ -113,8 +124,17 @@ class SettingsWindow(QWidget):
         self.resize(width, height)
         self._settings = dataclasses.replace(settings)
         self._key_fields: dict[str, QLineEdit] = {}
-        self._key_status: dict[str, QLabel] = {}
+        self._key_test_status: dict[str, QLabel] = {}
         self._key_timers: dict[str, QTimer] = {}
+        # True while a field is displaying a stored key rather than something typed.
+        self._key_masked: dict[str, bool] = {}
+
+        # Built before the tabs, because the Updates tab places it. Only appears once an
+        # update is downloaded and waiting: restarting is the whole install step, so the
+        # action shows up exactly when it does something. The tray menu carries it too.
+        self.restart_button = QPushButton("Restart to finish updating")
+        self.restart_button.clicked.connect(self.restart_requested.emit)
+        self.restart_button.setVisible(False)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(_scrollable(self._build_providers()), "Providers")
@@ -135,22 +155,11 @@ class SettingsWindow(QWidget):
         self._save_timer.setInterval(400)
         self._save_timer.timeout.connect(self._commit)
 
-        self._saved_note = hint("Changes are saved as you make them.")
-
-        # Only appears once an update is downloaded and waiting: restarting is the whole
-        # install step, so the action shows up exactly when it does something.
-        self.restart_button = QPushButton("Restart to finish updating")
-        self.restart_button.clicked.connect(self.restart_requested.emit)
-        self.restart_button.setVisible(False)
-
-        bottom = QHBoxLayout()
-        bottom.setContentsMargins(0, 0, 0, 0)
-        bottom.addWidget(self._saved_note, 1)
-        bottom.addWidget(self.restart_button)
-
+        # No footer. Its only permanent content was a line saying changes save themselves,
+        # which is not worth a strip of window, and the tabs can use the height.
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self.tabs, 1)
-        layout.addLayout(bottom)
 
         self.load(settings)
         self._wire_autosave()
@@ -204,11 +213,11 @@ class SettingsWindow(QWidget):
             form = QFormLayout(box)
 
             field = QLineEdit()
-            field.setEchoMode(QLineEdit.EchoMode.Password)
             field.setPlaceholderText("Paste your API key — it saves itself")
-            # Saved as it is entered, like every other setting. A key is pasted in one
-            # action, so a Save button was one extra click that could only be forgotten.
-            field.textChanged.connect(lambda _t, pid=spec.id: self._schedule_key_save(pid))
+            # textEdited, not textChanged: it fires only for user input, so loading a
+            # stored key into the field cannot be mistaken for entering a new one and
+            # saved back over the real value.
+            field.textEdited.connect(lambda _t, pid=spec.id: self._on_key_edited(pid))
             self._key_fields[spec.id] = field
 
             clear = QPushButton("Clear")
@@ -229,11 +238,14 @@ class SettingsWindow(QWidget):
             # HintLabel rather than a hand-styled QLabel: the previous
             # "color: palette(mid); font-size: 11px" was unreadable on a dark theme, which
             # is what made "No key set." impossible to see.
-            status = hint("")
-            self._key_status[spec.id] = status
+            # A label of its own, used only by Test. It previously shared the key-status
+            # label, so a result appeared for a moment and was then overwritten by a
+            # refresh -- a flicker with no way to read what it said.
+            test_status = hint("")
+            self._key_test_status[spec.id] = test_status
 
             form.addRow(holder)
-            form.addRow(status)
+            form.addRow(test_status)
             capability = []
             if spec.transcribes:
                 capability.append("transcription")
@@ -259,6 +271,19 @@ class SettingsWindow(QWidget):
         layout.addStretch(1)
         return page
 
+    def _on_key_edited(self, provider_id: str) -> None:
+        """The user typed or pasted. Clear the masked display and debounce a save."""
+        if self._key_masked.get(provider_id):
+            # They are replacing a stored key. Whatever survived of the mask is not part
+            # of the new value, so start clean.
+            self._key_masked[provider_id] = False
+            field = self._key_fields[provider_id]
+            field.blockSignals(True)
+            field.setText("")
+            field.blockSignals(False)
+            return
+        self._schedule_key_save(provider_id)
+
     def _schedule_key_save(self, provider_id: str) -> None:
         """Debounce the write.
 
@@ -275,20 +300,15 @@ class SettingsWindow(QWidget):
             timer.setInterval(700)
             timer.timeout.connect(lambda pid=provider_id: self._commit_key(pid))
             self._key_timers[provider_id] = timer
-        self._key_status[provider_id].setText("Saving…")
         timer.start()
 
     def _commit_key(self, provider_id: str) -> None:
         field = self._key_fields.get(provider_id)
-        if field is None:
+        if field is None or self._key_masked.get(provider_id):
             return
-        store = secrets.set_key(provider_id, field.text())
-        label = self._key_status[provider_id]
-        if store is secrets.Store.NONE:
-            label.setText("No key set.")
-        else:
-            key = field.text().strip()
-            label.setText(f"Saved to the {store}. Last 4: …{key[-4:]}")
+        secrets.set_key(provider_id, field.text())
+        if label := self._key_test_status.get(provider_id):
+            label.setText("")  # a result for the previous key means nothing now
         self.key_changed.emit(provider_id)
 
     def flush_pending_keys(self) -> None:
@@ -297,23 +317,33 @@ class SettingsWindow(QWidget):
                 timer.stop()
                 self._commit_key(provider_id)
 
-    def _clear_key(self, provider_id: str) -> None:
-        secrets.delete_key(provider_id)
-        self._key_fields[provider_id].clear()
-        self._key_status[provider_id].setText("Key cleared.")
-        self.key_changed.emit(provider_id)
+    # A stored key is shown masked to this many bullets, however long it really is. A
+    # 164-character key rendered literally is a wall of dots that says nothing.
+    MASK_LENGTH = 16
 
     def refresh_key_status(self) -> None:
+        """Show any stored key in its own field, masked except the last four characters.
+
+        Replaces a separate "a key is set, last 4: ..." line. The field is where someone
+        looks to see whether a key is set, and recognising the last four characters of
+        their own key is the fastest way to confirm it is the right one.
+        """
         for pid, spec in SPECS.items():
-            key, store = secrets.resolve_key(pid, spec.env_var)
-            label = self._key_status[pid]
+            field = self._key_fields[pid]
+            if field.hasFocus():
+                continue  # never rewrite a field somebody is typing into
+            key, _store = secrets.resolve_key(pid, spec.env_var)
+            field.blockSignals(True)
             if key:
-                label.setText(f"A key is set (from the {store}). Last 4: …{key[-4:]}")
+                field.setText("\u2022" * self.MASK_LENGTH + key[-4:])
+                self._key_masked[pid] = True
             else:
-                label.setText("No key set.")
+                field.setText("")
+                self._key_masked[pid] = False
+            field.blockSignals(False)
 
     def set_provider_test_result(self, provider_id: str, message: str) -> None:
-        if label := self._key_status.get(provider_id):
+        if label := self._key_test_status.get(provider_id):
             label.setText(message)
 
     # ==================================================================================
@@ -639,11 +669,15 @@ class SettingsWindow(QWidget):
 
         self.start_on_login = QCheckBox("Start yada when I log in")
         appearance_layout.addWidget(self.start_on_login)
+        self.start_minimized = QCheckBox("Start minimized to the system tray")
+        appearance_layout.addWidget(self.start_minimized)
         appearance_layout.addWidget(
             hint(
                 "A dictation shortcut is only useful if yada is already running. Registered "
                 "by yada itself rather than by the installer, which keeps antivirus "
-                "heuristics calmer about a freshly installed program."
+                "heuristics calmer about a freshly installed program.\n\n"
+                "Starting minimized hides this window on launch. Logging in is always quiet "
+                "either way — a window appearing at every boot is nobody's intent."
             )
         )
         layout.addWidget(appearance)
@@ -698,22 +732,24 @@ class SettingsWindow(QWidget):
         chime_box = QGroupBox("Chimes")
         chime_layout = QVBoxLayout(chime_box)
 
+        self.chime_listening = ChimeRow("Chime when yada starts listening")
         self.chime_transcription = ChimeRow("Chime when the transcript is ready")
         self.chime_transformation = ChimeRow("Chime when the AI cleanup finishes")
-        for row in (self.chime_transcription, self.chime_transformation):
+        for row in (self.chime_listening, self.chime_transcription, self.chime_transformation):
             row.preview_requested.connect(self.preview_sound_requested.emit)
             chime_layout.addWidget(row)
 
         self.chime_volume = VolumeRow()
         self.chime_volume.changed.connect(
-            lambda: self.preview_sound_requested.emit(self.chime_transcription.current_sound())
+            lambda: self.preview_sound_requested.emit(self.chime_listening.current_sound())
         )
         chime_layout.addWidget(self.chime_volume)
         chime_layout.addWidget(
             hint(
-                "The two built-in sounds differ in shape, not just pitch — one rises, the "
-                "other falls and settles — so you can tell the stages apart without looking. "
-                "Worth keeping that distinction if you use your own."
+                "The three built-in sounds differ in shape, not just pitch — a single tap "
+                "when listening starts, a rising pair when the transcript lands, a falling "
+                "pair when the cleanup finishes — so the stages are distinguishable without "
+                "looking. Worth keeping that distinction if you use your own."
             )
         )
 
@@ -728,13 +764,17 @@ class SettingsWindow(QWidget):
     def _on_library_changed(self) -> None:
         """Keep both pickers in step with the library after an import or removal."""
         self._reload_sound_pickers(
+            self.chime_listening.current_sound(),
             self.chime_transcription.current_sound(),
             self.chime_transformation.current_sound(),
         )
         self.sound_library_changed.emit()
 
-    def _reload_sound_pickers(self, transcription: str, transformation: str) -> None:
+    def _reload_sound_pickers(
+        self, listening: str, transcription: str, transformation: str
+    ) -> None:
         library = sounds.library()
+        self.chime_listening.set_library(library, current=listening)
         self.chime_transcription.set_library(library, current=transcription)
         self.chime_transformation.set_library(library, current=transformation)
 
@@ -782,7 +822,7 @@ class SettingsWindow(QWidget):
         layout.addWidget(labelled("Status", self.update_status))
         check = QPushButton("Check now")
         check.clicked.connect(self.check_updates_requested.emit)
-        layout.addLayout(button_row(check))
+        layout.addLayout(button_row(check, self.restart_button))
         layout.addStretch(1)
         return page
 
@@ -832,15 +872,19 @@ class SettingsWindow(QWidget):
 
         self._select(self.theme_combo, s.theme)
         self.start_on_login.setChecked(s.start_on_login)
+        self.start_minimized.setChecked(s.start_minimized)
         self._select(self.text_scale, s.text_scale)
         self.update_enabled.setChecked(s.updates_enabled)
         self.current_version_label.setText(_running_version())
         self._select(self.paste_mode, s.output.paste_mode)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
+        self.chime_listening.set_enabled_state(s.output.chime_on_listening)
         self.chime_transcription.set_enabled_state(s.output.chime_on_transcription)
         self.chime_transformation.set_enabled_state(s.output.chime_on_transformation)
         self._reload_sound_pickers(
-            s.output.chime_transcription_sound, s.output.chime_transformation_sound
+            s.output.chime_listening_sound,
+            s.output.chime_transcription_sound,
+            s.output.chime_transformation_sound,
         )
         self.chime_volume.set_value(s.output.chime_volume)
         self.sound_library.refresh()
@@ -889,12 +933,17 @@ class SettingsWindow(QWidget):
 
         s.theme = self.theme_combo.currentData() or "blue"
         s.start_on_login = self.start_on_login.isChecked()
+        s.start_minimized = self.start_minimized.isChecked()
         s.text_scale = float(self.text_scale.currentData() or 2.0)
         s.updates_enabled = self.update_enabled.isChecked()
         s.output.paste_mode = self.paste_mode.currentData() or "off"
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
+        s.output.chime_on_listening = self.chime_listening.is_enabled()
         s.output.chime_on_transcription = self.chime_transcription.is_enabled()
         s.output.chime_on_transformation = self.chime_transformation.is_enabled()
+        s.output.chime_listening_sound = (
+            self.chime_listening.current_sound() or s.output.chime_listening_sound
+        )
         s.output.chime_transcription_sound = (
             self.chime_transcription.current_sound() or s.output.chime_transcription_sound
         )
@@ -953,12 +1002,10 @@ class SettingsWindow(QWidget):
     def _schedule_save(self, *_args) -> None:
         if self._loading:
             return
-        self._saved_note.setText("Saving…")
         self._save_timer.start()
 
     def _commit(self) -> None:
         self.saved.emit(self.collect())
-        self._saved_note.setText("Changes are saved as you make them.")
 
     def flush_pending_save(self) -> None:
         """Write immediately, for the moment the window closes."""

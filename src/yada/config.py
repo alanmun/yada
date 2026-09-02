@@ -117,12 +117,16 @@ class TransformSettings:
 class OutputSettings:
     # off | after_transcription | after_transformation. Never automatic without opt-in.
     paste_mode: str = "off"
-    # Two distinct chimes; the transform one is noise when no transform is configured.
+    # Three distinct chimes. The listening one matters most: it is the only confirmation
+    # that the shortcut fired at all, and without it a misconfigured yada is
+    # indistinguishable from a shortcut that never registered.
+    chime_on_listening: bool = True
     chime_on_transcription: bool = True
     chime_on_transformation: bool = True
     # Which sound each stage uses, as a library id rather than a path: built-in sounds live
     # inside the versioned install directory, which is replaced on every update, so a
     # stored path would break on the next release. See output/sounds.py.
+    chime_listening_sound: str = "builtin:listening"
     chime_transcription_sound: str = "builtin:transcription"
     chime_transformation_sound: str = "builtin:transformation"
     chime_volume: float = 0.6
@@ -155,6 +159,10 @@ class Settings:
     # from a binary created seconds earlier is part of what got the old launcher
     # quarantined by Defender, so this is yada's own setting to honour.
     start_on_login: bool = True
+    # Off by default: a launch that produces no visible window looks like a launch that
+    # failed. Opting in gets the quiet tray-only behaviour. A login autostart is always
+    # quiet regardless, since a window appearing at every boot is nobody's intent.
+    start_minimized: bool = False
     # Multiplier on the platform's own UI font, 1.0-2.0. The platform default is 9pt on
     # Windows, which reads as tiny in a window full of prose; 1.6 is a fifth below double,
     # which is where it stopped feeling oversized.

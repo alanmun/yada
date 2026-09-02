@@ -93,6 +93,7 @@ Usage:
   yada doctor          Check whether this machine can run yada, and what is missing
   yada install         Install into your user profile and start (also happens on
                        first run from an extracted archive)
+  yada --minimized     Start without opening the window (used by the login entry)
   yada --version       Print the version
   yada --help          Show this message
 
@@ -108,6 +109,10 @@ def main(argv: list[str] | None = None) -> int:
     # borrow the terminal, so launching it from a shell returns the prompt immediately.
     if args:
         _prepare_console()
+
+    minimized = "--minimized" in args
+    if minimized:
+        args = [a for a in args if a != "--minimized"]
 
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)
@@ -177,11 +182,23 @@ def main(argv: list[str] | None = None) -> int:
         print(USAGE)
         return 2
 
-    # Bare `yada`: focus an existing instance rather than starting a second one.
+    # Order matters here. Running from an extracted archive means yada is not installed
+    # yet, and installing is the intent of the double-click -- even, especially, when an
+    # older copy is already running. Checking "is one running" first meant 0.1.8's
+    # executable found the running 0.1.7, forwarded a settings command to it, and exited:
+    # the new version appeared to do nothing at all. install_and_relaunch stops whatever
+    # is running before it replaces anything.
+    from .selfinstall import is_managed_install
+
+    if getattr(sys, "frozen", False) and not is_managed_install():
+        return _install()
+
+    # Bare `yada` from an installed copy: focus the existing instance rather than starting
+    # a second one.
     if ipc.is_running():
         ipc.send_command("settings")
         return 0
-    return _run_app()
+    return _run_app(minimized=minimized)
 
 
 def _install() -> int:
@@ -190,7 +207,11 @@ def _install() -> int:
 
     ok, message = install_and_relaunch()
     print(message)
-    _notify(message, error=not ok)
+    # Only failures get a dialog. On success the installed copy opens its own window in
+    # the foreground, which is the confirmation -- a modal "it worked, click OK" in front
+    # of it is pure friction.
+    if not ok:
+        _notify(message, error=True)
     return 0 if ok else 1
 
 
@@ -222,15 +243,9 @@ def _notify(message: str, *, error: bool = False) -> None:
         pass
 
 
-def _run_app(*, start_recording: bool = False, args: list[str] | None = None) -> int:
-    # Running from an extracted archive rather than a managed install means yada has not
-    # been installed yet. Double-clicking yada.exe there should install it, which is why
-    # there is no separate installer binary -- the last one was quarantined by Defender.
-    from .selfinstall import is_managed_install
-
-    if not is_managed_install() and getattr(sys, "frozen", False):
-        return _install()
-
+def _run_app(
+    *, start_recording: bool = False, minimized: bool = False, args: list[str] | None = None
+) -> int:
     # Applying an update is just launching the newer version, so this is checked before
     # anything expensive is imported. Replaces the separate launcher binary that Windows
     # Defender quarantined; see relaunch.py.
@@ -241,7 +256,7 @@ def _run_app(*, start_recording: bool = False, args: list[str] | None = None) ->
 
     from .app import main as app_main
 
-    return app_main(start_recording=start_recording)
+    return app_main(start_recording=start_recording, minimized=minimized)
 
 
 if __name__ == "__main__":

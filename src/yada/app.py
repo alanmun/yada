@@ -50,6 +50,7 @@ from .providers.base import (
 )
 from .providers.catalog import ModelCatalog
 from .providers.registry import SPECS, build_transcriber, build_transformer
+from .ui import wheelguard
 from .ui.settings_window import SettingsWindow
 from .ui.theme import apply_theme
 from .ui.tray import TrayIcon, ensure_tray_available
@@ -316,7 +317,11 @@ class YadaApp(QObject):
             entry = autostart / "yada.desktop"
             if self.settings.start_on_login:
                 autostart.mkdir(parents=True, exist_ok=True)
-                entry.write_text(desktop, encoding="utf-8")
+                # Quiet at login, for the same reason as the Windows run key.
+                entry.write_text(
+                    desktop.replace(f"Exec={executable}", f"Exec={executable} --minimized"),
+                    encoding="utf-8",
+                )
             elif entry.exists():
                 entry.unlink()
 
@@ -704,6 +709,7 @@ class YadaApp(QObject):
         """
         out = self.settings.output
         self.chimes.configure(
+            listening=out.chime_listening_sound,
             transcription=out.chime_transcription_sound,
             transformation=out.chime_transformation_sound,
             volume=out.chime_volume,
@@ -719,6 +725,8 @@ class YadaApp(QObject):
 
     def _chime(self, stage: Stage) -> None:
         out = self.settings.output
+        if stage is Stage.LISTENING and not out.chime_on_listening:
+            return
         if stage is Stage.TRANSCRIPTION and not out.chime_on_transcription:
             return
         if stage is Stage.TRANSFORMATION and not out.chime_on_transformation:
@@ -752,8 +760,20 @@ class YadaApp(QObject):
         for warning in result.warnings:
             self.tray.notify("yada", warning, warning=True)
 
+    # Prefix the session uses for "there is no provider configured".
+    NOT_CONFIGURED = "NOT_CONFIGURED: "
+
     def _on_error(self, message: str) -> None:
         self.tray.set_state(SessionState.IDLE)
+        if message.startswith(self.NOT_CONFIGURED):
+            # Show the window rather than a notification nobody will see, and land on the
+            # tab that fixes it. Pressing the shortcut with no key set is the most likely
+            # first experience, and a silent failure there is the worst possible one.
+            self.tray.notify("yada", message[len(self.NOT_CONFIGURED) :], warning=True)
+            self.show_settings()
+            if self.settings_window is not None:
+                self.settings_window.tabs.setCurrentIndex(0)
+            return
         self.tray.notify("yada", message, warning=True)
 
     def _on_warning(self, message: str) -> None:
@@ -915,10 +935,16 @@ def _as_enum(enum_cls, value, default):
         return default
 
 
-def main(argv: list[str] | None = None, *, start_recording: bool = False) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    start_recording: bool = False,
+    minimized: bool = False,
+) -> int:
     app = QApplication(argv or [])
     app.setApplicationName("yada")
-    app.setApplicationDisplayName("yada")
+    # Deliberately no display name: Qt appends it to every window title, which turned
+    # "yada settings" into "yada settings - yada".
     app.setDesktopFileName("yada")
     # The fix for the behaviour that prompted this project: without this, closing the
     # settings window terminates the app instead of leaving it in the tray.
@@ -928,9 +954,19 @@ def main(argv: list[str] | None = None, *, start_recording: bool = False) -> int
     # recoloured. Read straight from disk: YadaApp has not loaded settings yet.
     startup_settings = config.load()
     apply_theme(app, startup_settings.theme, startup_settings.text_scale)
+    # Kept on the app object: Qt does not own event filters, and an unreferenced one is
+    # collected and stops working.
+    app._yada_wheel_guard = wheelguard.install(app)
 
     yada = YadaApp(app)
     yada.start()
+
+    # Open the window unless told otherwise. A launch that produces nothing visible reads
+    # as a launch that failed -- which is exactly what happened when the only feedback was
+    # a tray icon Windows 11 hides behind the ^ arrow. The login autostart entry passes
+    # --minimized, so starting with the machine stays quiet either way.
+    if not minimized and not yada.settings.start_minimized:
+        QTimer.singleShot(0, yada.show_settings)
     if start_recording:
         # Reached when a desktop shortcut fired `yada toggle` with nothing running. Begin
         # recording once the tray is up, so the keypress is not silently wasted.

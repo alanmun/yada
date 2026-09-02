@@ -41,6 +41,7 @@ class ChimePlayer:
     def configure(
         self,
         *,
+        listening: str | None = None,
         transcription: str | None = None,
         transformation: str | None = None,
         volume: float | None = None,
@@ -55,6 +56,7 @@ class ChimePlayer:
             self._volume = max(0.0, min(1.0, volume))
 
         wanted = {
+            Stage.LISTENING: listening,
             Stage.TRANSCRIPTION: transcription,
             Stage.TRANSFORMATION: transformation,
         }
@@ -75,6 +77,7 @@ class ChimePlayer:
     def preload(self) -> None:
         """Load the defaults. Kept for callers that have no settings yet."""
         self.configure(
+            listening=sounds.DEFAULT_FOR_STAGE[Stage.LISTENING],
             transcription=sounds.DEFAULT_FOR_STAGE[Stage.TRANSCRIPTION],
             transformation=sounds.DEFAULT_FOR_STAGE[Stage.TRANSFORMATION],
         )

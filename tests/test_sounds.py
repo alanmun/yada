@@ -40,9 +40,17 @@ def _make_wav(path, *, seconds=0.25, rate=48_000, nchannels=1, sampwidth=2):
 
 def test_builtins_are_always_present(library):
     ids = [s.id for s in sounds.library()]
+    assert "builtin:listening" in ids
     assert "builtin:transcription" in ids
     assert "builtin:transformation" in ids
     assert all(s.builtin for s in sounds.builtin_sounds())
+
+
+def test_every_stage_has_a_default_sound(library):
+    """A stage without one would be silent, which reads as a broken chime."""
+    for stage in Stage:
+        default = sounds.DEFAULT_FOR_STAGE[stage]
+        assert sounds.resolve(default) is not None, f"{stage} has no usable default"
 
 
 def test_builtins_are_not_removable(library):
@@ -53,8 +61,8 @@ def test_builtins_are_not_removable(library):
 def test_imports_appear_after_the_builtins(library, tmp_path):
     sounds.import_sound(_make_wav(tmp_path / "src" / "ping.wav"))
     ids = [s.id for s in sounds.library()]
-    assert ids[:2] == ["builtin:transcription", "builtin:transformation"]
-    assert ids[2] == "custom:ping.wav", "imports follow the built-ins in one blended list"
+    assert ids[: len(sounds.BUILTINS)] == [f"builtin:{k}" for k in sounds.BUILTINS]
+    assert ids[-1] == "custom:ping.wav", "imports follow the built-ins in one blended list"
 
 
 def test_both_stages_can_use_any_sound(library, tmp_path):

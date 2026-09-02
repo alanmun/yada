@@ -1,6 +1,6 @@
 [project]
 name = "yada"
-version = "0.1.8"
+version = "0.1.9"
 description = "Tray-resident push-to-talk dictation: hotkey, transcribe, transform, paste."
 requires-python = ">=3.11"
 dependencies = [
