@@ -10,8 +10,10 @@ import base64
 import functools
 import hashlib
 import http.server
+import sys
 import tarfile
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -35,15 +37,29 @@ def signing_key():
     return key, base64.b64encode(pub).decode()
 
 
+# Release assets are named and packed per platform, and `platform_asset()` selects on
+# both tokens. Tests that hardcoded the Linux names passed locally and failed the whole
+# Windows CI job, so the helpers follow the running platform.
+IS_WINDOWS = sys.platform == "win32"
+PLATFORM_TAG = "windows-x86_64" if IS_WINDOWS else "linux-x86_64"
+ARCHIVE_EXT = ".zip" if IS_WINDOWS else ".tar.gz"
+
+
 def _make_archive(dirpath: Path, version: str, *, body: str = "#!/bin/sh\necho yada\n") -> Path:
-    """A plausible release tarball: one top-level dir containing the executable."""
+    """A plausible release archive: one top-level dir containing the executable."""
     stage = dirpath / f"yada-{version}"
     stage.mkdir(parents=True, exist_ok=True)
-    (stage / "yada").write_text(body)
+    (stage / core.executable_name()).write_text(body)
     (stage / "lib.so").write_text("x" * 128)
-    archive = dirpath / f"yada-{version}-linux-x86_64.tar.gz"
-    with tarfile.open(archive, "w:gz") as tf:
-        tf.add(stage, arcname=stage.name)
+    archive = dirpath / f"yada-{version}-{PLATFORM_TAG}{ARCHIVE_EXT}"
+    if IS_WINDOWS:
+        with zipfile.ZipFile(archive, "w") as zf:
+            for item in sorted(stage.rglob("*")):
+                if item.is_file():
+                    zf.write(item, item.relative_to(dirpath))
+    else:
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(stage, arcname=stage.name)
     return archive
 
 
@@ -181,7 +197,7 @@ async def test_missing_checksums_refused(install_root, server, signing_key):
 
 
 def test_path_traversal_in_archive_is_rejected(install_root, tmp_path):
-    evil = tmp_path / "evil-linux-x86_64.tar.gz"
+    evil = tmp_path / f"evil-{PLATFORM_TAG}.tar.gz"
     payload = tmp_path / "payload"
     payload.write_text("pwned")
     with tarfile.open(evil, "w:gz") as tf:
@@ -192,7 +208,7 @@ def test_path_traversal_in_archive_is_rejected(install_root, tmp_path):
 
 
 def test_extraction_without_executable_is_rejected(install_root, tmp_path):
-    bad = tmp_path / "nobin-linux-x86_64.tar.gz"
+    bad = tmp_path / f"nobin-{PLATFORM_TAG}.tar.gz"
     junk = tmp_path / "readme.txt"
     junk.write_text("nothing useful")
     with tarfile.open(bad, "w:gz") as tf:
@@ -287,3 +303,82 @@ async def test_public_key_is_read_at_call_time_not_import_time(install_root, ser
     monkeypatch.setattr(github, "RELEASE_PUBLIC_KEY_B64", pub)
     archive = await github.download_and_verify(release)  # no explicit key
     assert archive.exists()
+
+
+# --------------------------------------------------------------------------------------
+# Asset selection — the logic that broke Windows CI
+# --------------------------------------------------------------------------------------
+
+
+def _release_with_both_platforms() -> github.Release:
+    return github.Release(
+        version="1.0.0",
+        tag="v1.0.0",
+        notes="",
+        prerelease=False,
+        assets=(
+            github.Asset("yada-1.0.0-linux-x86_64.tar.gz", "http://x/l", 1),
+            github.Asset("yada-1.0.0-windows-x86_64.zip", "http://x/w", 1),
+            github.Asset("SHA256SUMS", "http://x/s", 1),
+        ),
+    )
+
+
+def test_platform_asset_picks_the_windows_zip(monkeypatch):
+    """Runs on Linux too, so the Windows branch is covered wherever tests run."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    asset = _release_with_both_platforms().platform_asset()
+    assert asset is not None and asset.name.endswith(".zip")
+    assert "windows" in asset.name
+
+
+def test_platform_asset_picks_the_linux_tarball(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    asset = _release_with_both_platforms().platform_asset()
+    assert asset is not None and asset.name.endswith(".tar.gz")
+    assert "linux" in asset.name
+
+
+def test_platform_asset_is_none_when_the_release_lacks_this_platform(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    release = github.Release(
+        version="1.0.0",
+        tag="v1.0.0",
+        notes="",
+        prerelease=False,
+        assets=(github.Asset("yada-1.0.0-linux-x86_64.tar.gz", "http://x/l", 1),),
+    )
+    assert release.platform_asset() is None
+
+
+def _pack(dirpath: Path, name: str, *, as_zip: bool) -> Path:
+    """Build an archive of either kind, so both extraction branches run on every OS."""
+    stage = dirpath / "yada-9.9.9"
+    stage.mkdir(parents=True, exist_ok=True)
+    (stage / core.executable_name()).write_text("#!/bin/sh\n")
+    (stage / "_internal").mkdir(exist_ok=True)
+    (stage / "_internal" / "payload.bin").write_bytes(b"\x00" * 64)
+    archive = dirpath / name
+    if as_zip:
+        with zipfile.ZipFile(archive, "w") as zf:
+            for item in sorted(stage.rglob("*")):
+                if item.is_file():
+                    zf.write(item, item.relative_to(dirpath))
+    else:
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(stage, arcname=stage.name)
+    return archive
+
+
+@pytest.mark.parametrize("as_zip", [True, False], ids=["zip", "tar.gz"])
+def test_both_archive_formats_extract(install_root, tmp_path, as_zip):
+    """Linux releases ship .tar.gz and Windows .zip, so each OS would otherwise only ever
+    exercise its own branch of extract_release."""
+    archive = _pack(tmp_path, f"yada-9.9.9{'.zip' if as_zip else '.tar.gz'}", as_zip=as_zip)
+    target = github.extract_release(archive, "9.9.9")
+
+    assert (target / core.executable_name()).exists(), "executable must land at the top level"
+    assert (target / "_internal" / "payload.bin").exists(), "bundle contents must survive"
+    assert not (target / "yada-9.9.9").exists(), "the single wrapper dir must be flattened"
+    assert (target / ".complete").exists()
+    assert not archive.exists(), "archive is cleaned up after extraction"
