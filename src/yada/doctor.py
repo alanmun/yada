@@ -10,6 +10,7 @@ it. Nothing here touches the network or costs money.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ import sys
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import config, secrets
 from .providers.registry import SPECS
@@ -247,17 +249,46 @@ def _credential_checks() -> list[Check]:
 
 
 def _install_checks() -> list[Check]:
-    from .updater.core import install_root, installed_versions, read_current
+    from .updater.core import (
+        KEEP_VERSIONS,
+        install_root,
+        installed_versions,
+        read_current,
+    )
     from .updater.github import RELEASE_PUBLIC_KEY_B64
 
     checks: list[Check] = []
     versions = installed_versions()
     current = read_current()
     if versions:
-        listed = ", ".join(f"{v.version}{'*' if v.version == current else ''}" for v in versions)
-        checks.append(
-            Check("Installed versions", OK, f"{listed}  (* = active) in {install_root()}")
+        def size_mb(path: Path) -> int:
+            total = 0
+            for item in path.rglob("*"):
+                if item.is_file():
+                    with contextlib.suppress(OSError):
+                        total += item.stat().st_size
+            return round(total / (1024 * 1024))
+
+        listed = ", ".join(
+            f"{v.version}{'*' if v.version == current else ''} ({size_mb(v.path)} MB)"
+            for v in versions
         )
+        note = f"{listed}  (* = active) in {install_root()}"
+        # A version directory is around 190 MB, and only the newest couple are kept. Worth
+        # showing, because "why is this app 400 MB" deserves an answer on screen.
+        if len(versions) > KEEP_VERSIONS:
+            checks.append(
+                Check(
+                    "Installed versions",
+                    WARN,
+                    f"{note} — more than the {KEEP_VERSIONS} yada keeps",
+                    "The extra copies are pruned the next time yada starts. The active "
+                    "version is never removed, so a stale 'current' pointer can pin an "
+                    "old one.",
+                )
+            )
+        else:
+            checks.append(Check("Installed versions", OK, note))
     else:
         checks.append(
             Check("Installed versions", WARN, "running from source, not a managed install")

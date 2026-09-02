@@ -388,3 +388,43 @@ def test_both_archive_formats_extract(install_root, tmp_path, as_zip):
 # --------------------------------------------------------------------------------------
 # Launch accounting — client commands must not look like failed launches
 # --------------------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------------------
+# Disk retention — a version directory is ~190 MB, so this is not housekeeping trivia
+# --------------------------------------------------------------------------------------
+
+
+def test_pruning_keeps_only_the_newest_few(install_root):
+    for v in ("0.1.0", "0.1.1", "0.1.2", "0.1.4", "0.1.5"):
+        _install_fake(v)
+    core.write_current("0.1.5")
+
+    removed = core.prune_old_versions()
+    assert sorted(removed) == ["0.1.0", "0.1.1", "0.1.2"]
+    assert [v.version for v in core.installed_versions()] == ["0.1.5", "0.1.4"]
+
+
+def test_a_stale_current_pointer_pins_its_version(install_root):
+    """The active version is never deleted, even when it is old.
+
+    Deliberate: removing what `current` names would leave nothing to fall back to. The
+    consequence is that a pointer left behind by running a version directly keeps that
+    version on disk, which is worth knowing rather than surprising.
+    """
+    for v in ("0.1.0", "0.1.1", "0.1.2", "0.1.4", "0.1.5"):
+        _install_fake(v)
+    core.write_current("0.1.1")
+
+    core.prune_old_versions()
+    remaining = [v.version for v in core.installed_versions()]
+    assert "0.1.1" in remaining, "the active version must survive pruning"
+    assert "0.1.5" in remaining and "0.1.4" in remaining
+    assert "0.1.0" not in remaining and "0.1.2" not in remaining
+
+
+def test_pruning_is_safe_with_nothing_to_prune(install_root):
+    _install_fake("0.1.5")
+    core.write_current("0.1.5")
+    assert core.prune_old_versions() == []
+    assert [v.version for v in core.installed_versions()] == ["0.1.5"]

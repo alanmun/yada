@@ -225,6 +225,13 @@ them. CI also verifies that the signature it just produced validates against the
 *compiled into the binaries being shipped*, so pasting the wrong half of a keypair fails the
 release instead of publishing something every client refuses.
 
+**Disk retention.** A version directory is roughly 190 MB, so this is not housekeeping
+trivia. The two newest releases are kept and the rest deleted, and `staging/` is emptied
+since a partial download is never resumed. Pruning runs at startup as well as after
+staging an update, so an install that never receives one still reclaims space. The version
+named by `current` is never deleted — there would be nothing to fall back to — which does
+mean a pointer left behind by running a version directly keeps that version on disk.
+
 **Failure is contained.** A `.complete` marker is written last and is the only thing trusted,
 so an interrupted extraction is ignored rather than booted. A version that starts three
 times without reporting healthy stops being chosen, and the previous release is still on

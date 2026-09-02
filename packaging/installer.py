@@ -63,6 +63,49 @@ def read_version(here: Path) -> str:
     )
 
 
+KEEP_VERSIONS = 2
+
+
+def _parse_version(text: str) -> tuple[int, ...]:
+    """Compare version directory names.
+
+    Duplicated from yada.updater.core rather than imported: this installer is frozen
+    stdlib-only so it can set up an application that may not itself start, and four lines
+    is a cheaper price than that dependency.
+    """
+    core = text.strip().lstrip("vV").split("-")[0].split("+")[0]
+    parts: list[int] = []
+    for chunk in core.split("."):
+        if not chunk.isdigit():
+            break
+        parts.append(int(chunk))
+    return tuple(parts) or (0,)
+
+
+def prune_old_versions(root: Path, keep_version: str) -> list[str]:
+    """Keep the newest few releases and delete the rest.
+
+    Each version directory is around 190 MB, so installing releases by hand without this
+    quietly accumulates gigabytes. The version just installed is never removed, whatever
+    its number, so installing an older build deliberately still works.
+    """
+    versions_root = root / "versions"
+    if not versions_root.is_dir():
+        return []
+    found = sorted(
+        (p for p in versions_root.iterdir() if p.is_dir()),
+        key=lambda p: _parse_version(p.name),
+        reverse=True,
+    )
+    removed: list[str] = []
+    for stale in found[KEEP_VERSIONS:]:
+        if stale.name == keep_version:
+            continue
+        shutil.rmtree(stale, ignore_errors=True)
+        removed.append(stale.name)
+    return removed
+
+
 def install(here: Path, root: Path, version: str) -> None:
     target = root / "versions" / version
     if target.exists():
@@ -96,6 +139,12 @@ def install(here: Path, root: Path, version: str) -> None:
     # application was never touched. Shortcuts now point straight at a version's own
     # executable, and the running version keeps them current.
     (root / "current").write_text(version + "\n", encoding="utf-8")
+
+    # Partial downloads from a previous run are never resumed, so they are pure waste.
+    shutil.rmtree(root / "staging", ignore_errors=True)
+
+    if pruned := prune_old_versions(root, version):
+        print(f"  removed old version(s): {', '.join(pruned)}")
 
 
 def add_windows_integration(root: Path, version: str) -> None:

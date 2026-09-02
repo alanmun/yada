@@ -189,6 +189,31 @@ class YadaApp(QObject):
                 mark_healthy(version)
 
         self._sync_desktop_integration()
+        self._tidy_install()
+
+    def _tidy_install(self) -> None:
+        """Drop superseded versions and abandoned downloads.
+
+        Pruning used to happen only after an update was staged, so an install that never
+        received one kept everything forever -- and each version directory is around
+        190 MB. Doing it at startup means disk is reclaimed even if updates are switched
+        off entirely.
+
+        Nothing in staging is ever resumed, so a leftover archive there is pure waste.
+        Safe at startup specifically: the first update check is a minute away, so no
+        download can be in flight yet.
+        """
+        import shutil
+
+        from .updater import prune_old_versions, staging_dir
+
+        with contextlib.suppress(OSError):
+            shutil.rmtree(staging_dir(), ignore_errors=True)
+        try:
+            if removed := prune_old_versions():
+                print(f"yada: removed superseded version(s): {', '.join(removed)}")
+        except OSError as exc:
+            print(f"yada: could not prune old versions ({exc})")
 
     def _sync_desktop_integration(self) -> None:
         """Keep the Start Menu shortcut and autostart entry pointing at this version.
@@ -729,6 +754,7 @@ class YadaApp(QObject):
             apply_theme(self.app, new_settings.theme)
         if new_settings.start_on_login != old.start_on_login:
             self._sync_desktop_integration()
+        self._tidy_install()
         self.tray.set_shortcut_label(self._shortcut_label())
         if new_settings.transcription.provider != old.transcription.provider:
             self.refresh_models("transcription")

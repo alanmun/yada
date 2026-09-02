@@ -100,7 +100,7 @@ quietly at paste time. On Windows both features work with no setup.
 | Settings | `~/.config/yada/settings.json` · `%APPDATA%\yada\settings.json` |
 | API keys | OS keyring (KWallet / Credential Manager), or a `0600` file if none exists |
 | Discovered models | `~/.cache/yada/catalog.json` · `%LOCALAPPDATA%\yada\Cache` |
-| Installed versions | `~/.local/share/yada/` · `%LOCALAPPDATA%\yada\` |
+| Installed versions | `~/.local/share/yada/` · `%LOCALAPPDATA%\yada\` — two kept, ~190 MB each |
 
 Settings are plain JSON, safe to hand-edit while yada is closed. API keys are never written
 there. A key entered once works from both a source checkout and the installed app, so there
