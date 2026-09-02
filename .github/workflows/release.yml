@@ -69,6 +69,9 @@ jobs:
       - name: Build the launcher
         run: uv run pyinstaller --noconfirm --clean packaging/yada-launcher.spec
 
+      - name: Build the double-click installer
+        run: uv run pyinstaller --noconfirm --clean packaging/installer.spec
+
       - name: Assemble the payload
         shell: bash
         env:
@@ -79,13 +82,17 @@ jobs:
           # the app plus _internal make it an update payload.
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp dist/yada-launcher.exe dist/yada/yada-launcher.exe
+            cp dist/INSTALL.exe dist/yada/INSTALL.exe
             cp packaging/install.ps1 dist/yada/install.ps1
           else
             cp dist/yada-launcher dist/yada/yada-launcher
-            chmod +x dist/yada/yada-launcher dist/yada/yada
+            cp dist/INSTALL dist/yada/INSTALL
+            chmod +x dist/yada/yada-launcher dist/yada/yada dist/yada/INSTALL
             cp packaging/install.sh dist/yada/install.sh
             chmod +x dist/yada/install.sh
           fi
+          # Tells a human which file to open; the rest of the folder is the runtime.
+          cp packaging/README-release.txt dist/yada/README.txt
           # Sanity check: extract_release refuses an archive without this, so fail here
           # instead of shipping something no client will install.
           test -f "dist/yada/yada" || test -f "dist/yada/yada.exe"
@@ -105,6 +112,15 @@ jobs:
           else
             tar -czf "../out/${NAME}.tar.gz" yada
           fi
+
+      - name: Smoke test the built application
+        # The point of this job: prove the binaries actually start on a real machine of
+        # this OS before anything is published, instead of finding out from a user.
+        # Exercises the frozen import graph, the installer, and a launch/IPC/stop cycle.
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: bash packaging/smoke_test.sh "$VERSION"
 
       - uses: actions/upload-artifact@v4
         with:

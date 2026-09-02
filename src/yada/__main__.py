@@ -10,6 +10,51 @@ from __future__ import annotations
 
 import sys
 
+
+def _attach_parent_console() -> None:
+    """On Windows, reattach to the calling terminal so CLI output is actually visible.
+
+    yada.exe is built for the GUI subsystem, because a tray app must not flash a console
+    window on every launch. The cost is that it starts with no stdout at all: run
+    `yada doctor` from PowerShell and it prints nothing, succeeds, and tells you nothing.
+
+    AttachConsole(ATTACH_PARENT_PROCESS) borrows the terminal that launched us, then the
+    standard streams are reopened onto it. Fails harmlessly when there is no parent console
+    (launched from a shortcut, or from the hotkey), which is exactly when nobody is reading.
+    """
+    if sys.platform != "win32":
+        return
+
+    # If stdout already works, leave it alone. A GUI-subsystem process launched with its
+    # output redirected (`yada doctor > out.txt`, or captured by a CI step) does get real
+    # handles, and reopening CONOUT$ would write past the redirection to the console
+    # device instead -- output would appear on screen but vanish from the capture.
+    if sys.stdout is not None:
+        try:
+            sys.stdout.write("")
+            sys.stdout.flush()
+            return
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    try:
+        import ctypes
+
+        ATTACH_PARENT_PROCESS = -1
+        if not ctypes.windll.kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+            return
+        # Not context-managed on purpose: these replace the process-wide standard streams
+        # and must stay open for the lifetime of the process.
+        sys.stdout = open(  # noqa: SIM115
+            "CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace"
+        )
+        sys.stderr = open(  # noqa: SIM115
+            "CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace"
+        )
+        sys.stdin = open("CONIN$", encoding="utf-8", errors="replace")  # noqa: SIM115
+    except Exception:  # noqa: BLE001 - no console is a normal state, never a failure
+        return
+
 USAGE = """yada — Yet Another Dictating App
 
 Usage:
@@ -29,6 +74,11 @@ applications are not permitted to grab keys themselves.
 
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
+
+    # Any subcommand may print. Bare `yada` starts the tray app and deliberately does not
+    # borrow the terminal, so launching it from a shell returns the prompt immediately.
+    if args:
+        _attach_parent_console()
 
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)

@@ -13,12 +13,17 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = if ($env:YADA_INSTALL_ROOT) { $env:YADA_INSTALL_ROOT } else { Join-Path $env:LOCALAPPDATA 'yada' }
 
+# Version, in order of reliability. The VERSION file is written by CI into every archive
+# and is the dependable source. Asking the binary cannot work here: yada.exe is built for
+# the Windows GUI subsystem so it has no stdout, and `& yada.exe --version` returns nothing.
 $version = $env:YADA_VERSION
 if (-not $version) {
-    # Ask the binary, so the installer works from a plain extracted archive.
-    $version = (& (Join-Path $here 'yada.exe') --version) -split ' ' | Select-Object -Last 1
+    $versionFile = Join-Path $here 'VERSION'
+    if (Test-Path $versionFile) { $version = (Get-Content $versionFile -Raw).Trim() }
 }
-if (-not $version) { throw 'Could not determine the version. Set YADA_VERSION and retry.' }
+if (-not $version) {
+    throw "Could not determine the version: no VERSION file next to this script. Re-download the release archive, or set `$env:YADA_VERSION and retry."
+}
 
 Write-Host "Installing yada $version into $root"
 $versionDir = Join-Path $root "versions\$version"

@@ -25,6 +25,27 @@ from .updater.core import (
     write_current,
 )
 
+# Subcommands that talk to an already-running instance (or just print) rather than
+# starting the GUI. Running one of these says nothing about whether this version boots, so
+# it must not count towards the health accounting that drives automatic rollback --
+# otherwise three hotkey presses on a never-yet-started install would look like three
+# failed launches and demote a perfectly good version.
+CLIENT_COMMANDS = frozenset(
+    {
+        "toggle",
+        "settings",
+        "stop",
+        "status",
+        "doctor",
+        "version",
+        "--version",
+        "-V",
+        "help",
+        "--help",
+        "-h",
+    }
+)
+
 
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
@@ -52,7 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     # health counter can decide to fall back next time.
     if read_current() != target.version:
         write_current(target.version)
-    note_launch_attempt(target.version)
+    # Only a real GUI launch counts: the app calls mark_healthy() once it is up, and these
+    # two must describe the same event or rollback fires on the wrong signal.
+    if not args or args[0] not in CLIENT_COMMANDS:
+        note_launch_attempt(target.version)
     prune_old_versions()
 
     cmd = [str(target.executable), *args]

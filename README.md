@@ -44,24 +44,24 @@ through an app nobody has updated. yada is built around avoiding exactly that.
 ## Install
 
 Download the archive for your platform from
-[Releases](https://github.com/alanmun/yada/releases), extract it, and run the installer.
-Everything goes under your own user profile; no administrator rights are needed.
+[Releases](https://github.com/alanmun/yada/releases), extract it, and **double-click
+`INSTALL`** (`INSTALL.exe` on Windows). That is the whole process — no command line, no
+administrator rights. Everything goes under your own user profile.
 
-**Linux (KDE Plasma)**
-
-```sh
-tar -xzf yada-*-linux-x86_64.tar.gz
-cd yada && ./install.sh
-```
-
-**Windows 11**
-
-```powershell
-Expand-Archive yada-*-windows-x86_64.zip -DestinationPath yada
-cd yada; .\install.ps1
-```
+Windows will warn that the publisher is unrecognised, because these binaries are not
+code-signed: choose **More info** then **Run anyway**.
 
 Then open Settings from the tray icon and paste an API key.
+
+If anything looks wrong, yada can diagnose itself:
+
+```
+Windows:  %LOCALAPPDATA%\yada\yada.exe doctor
+Linux:    ~/.local/share/yada/yada doctor
+```
+
+It reports on the microphone, tray, keyring, shortcut backend, paste capability and API
+keys, and names the fix for anything missing.
 
 ## The Wayland situation
 

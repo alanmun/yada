@@ -17,12 +17,18 @@ ROOT="${YADA_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/yada}"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 
+# The VERSION file is written by CI into every archive and is the dependable source.
+# Asking the binary is a last resort and cannot work at all on Windows, where the GUI
+# subsystem gives it no stdout.
+if [ -z "$VERSION" ] && [ -f "$HERE/VERSION" ]; then
+    VERSION="$(tr -d '\r\n' < "$HERE/VERSION")"
+fi
 if [ -z "$VERSION" ]; then
-    # Fall back to asking the binary, so the installer works from a plain extracted archive.
     VERSION="$("$HERE/yada" --version 2>/dev/null | awk '{print $2}')" || VERSION=""
 fi
 if [ -z "$VERSION" ]; then
-    echo "Could not determine the version. Set YADA_VERSION and retry." >&2
+    echo "Could not determine the version: no VERSION file next to this script." >&2
+    echo "Re-download the release archive, or set YADA_VERSION and retry." >&2
     exit 1
 fi
 

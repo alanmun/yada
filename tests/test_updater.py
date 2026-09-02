@@ -383,3 +383,30 @@ def test_both_archive_formats_extract(install_root, tmp_path, as_zip):
     assert not (target / "yada-9.9.9").exists(), "the single wrapper dir must be flattened"
     assert (target / ".complete").exists()
     assert not archive.exists(), "archive is cleaned up after extraction"
+
+
+# --------------------------------------------------------------------------------------
+# Launch accounting — client commands must not look like failed launches
+# --------------------------------------------------------------------------------------
+
+
+def test_client_commands_do_not_count_as_launch_attempts(install_root, monkeypatch):
+    """`yada toggle` runs on every hotkey press.
+
+    If those counted as launch attempts, three presses on an install that had not yet
+    started successfully would demote a perfectly good version.
+    """
+    from yada import launcher
+
+    _install_fake("0.2.0")
+    core.write_current("0.2.0")
+    monkeypatch.setattr(launcher, "os", type("os", (), {"execv": lambda *a: None})())
+    monkeypatch.setattr(launcher, "subprocess", type("sp", (), {"Popen": lambda *a, **k: None})())
+
+    for command in ("toggle", "status", "doctor", "--version", "stop"):
+        launcher.main([command])
+    assert core._load_state().get("versions", {}).get("0.2.0", {}).get("attempts", 0) == 0
+
+    # A real launch, with no subcommand, does count.
+    launcher.main([])
+    assert core._load_state()["versions"]["0.2.0"]["attempts"] == 1
