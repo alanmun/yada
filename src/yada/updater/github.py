@@ -32,7 +32,7 @@ from pathlib import Path
 
 import httpx
 
-from .core import is_newer, staging_dir, versions_dir
+from .core import SwapFailed, is_newer, staging_dir, swap_in, versions_dir
 
 GITHUB_API = "https://api.github.com"
 CHECKSUM_ASSET = "SHA256SUMS"
@@ -300,12 +300,11 @@ async def download_and_verify(
     else:
         sums_raw = await _fetch_bytes(sums_asset.url)
         if sig_asset is not None and public_key_b64:
-            verify_signature(sums_raw, await _fetch_bytes(sig_asset.url),
-                             public_key_b64=public_key_b64)
-        elif not allow_unsigned:
-            raise UpdateError(
-                f"release {release.tag} is not signed and allow_unsigned is off"
+            verify_signature(
+                sums_raw, await _fetch_bytes(sig_asset.url), public_key_b64=public_key_b64
             )
+        elif not allow_unsigned:
+            raise UpdateError(f"release {release.tag} is not signed and allow_unsigned is off")
         checksums = parse_checksums(sums_raw.decode("utf-8", "replace"))
 
     archive = staging_dir() / asset.name
@@ -335,31 +334,6 @@ def _safe_members(names: list[str]) -> None:
         p = Path(name)
         if p.is_absolute() or ".." in p.parts:
             raise UpdateError(f"archive contains an unsafe path: {name}")
-
-
-def _empty_target(target: Path) -> None:
-    """Remove `target` completely, or raise.
-
-    Deliberately not ignore_errors. The previous version swallowed failures here, so a
-    single locked file -- a DLL still held by a running instance is the obvious case on
-    Windows -- survived, the new files were written alongside it, and `.complete` then
-    marked the mixture as trustworthy. Refusing to install beats installing a version
-    made of two.
-    """
-    if not target.exists():
-        return
-    try:
-        shutil.rmtree(target)
-    except OSError as exc:
-        raise UpdateError(
-            f"could not clear the previous {target.name} directory ({exc}). "
-            "Something is still using a file inside it; close yada and try again."
-        ) from exc
-    if target.exists():
-        raise UpdateError(
-            f"{target.name} could not be fully removed, so installing over it would mix "
-            "two versions. Close yada and try again."
-        )
 
 
 def extract_release(archive: Path, version: str) -> Path:
@@ -398,8 +372,13 @@ def extract_release(archive: Path, version: str) -> Path:
         if sys.platform != "win32":
             exe.chmod(0o755)
 
-        _empty_target(target)
-        os.replace(staging_target, target)
+        try:
+            swap_in(staging_target, target)
+        except SwapFailed as exc:
+            raise UpdateError(
+                f"could not install {version} over the existing directory ({exc}). "
+                "The version already there was left intact."
+            ) from exc
     except UpdateError:
         shutil.rmtree(staging_target, ignore_errors=True)
         raise

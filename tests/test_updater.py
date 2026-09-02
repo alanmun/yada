@@ -292,8 +292,9 @@ def test_pruning_keeps_running_version(install_root):
     assert "0.4.0" in remaining and "0.3.0" in remaining
 
 
-async def test_public_key_is_read_at_call_time_not_import_time(install_root, server,
-                                                               signing_key, monkeypatch):
+async def test_public_key_is_read_at_call_time_not_import_time(
+    install_root, server, signing_key, monkeypatch
+):
     """The module constant must be live.
 
     An earlier version took the key as a default argument value, which bound it at import
@@ -460,33 +461,115 @@ def test_reinstalling_a_version_leaves_nothing_from_the_old_one(install_root, tm
     assert (target / "_internal" / "payload.bin").exists()
 
 
-def test_extraction_refuses_rather_than_merging_when_the_old_dir_cannot_be_removed(
+def test_extraction_refuses_rather_than_merging_when_the_old_dir_cannot_be_replaced(
     install_root, tmp_path, monkeypatch
 ):
-    """Refusing to install beats installing a version made of two.
+    """Refusing to install beats installing a version made of two -- or made of none.
 
-    The old code passed ignore_errors=True, so a locked file survived silently and the new
-    files were written alongside it -- then marked complete.
+    Two behaviours have been wrong here. First `ignore_errors=True`, so a locked file
+    survived silently and the new files were written alongside it, then marked complete.
+    Then a verified `rmtree`, which deletes file by file: a copy running out of the target
+    holds one DLL mapped, so everything else was already deleted by the time Windows
+    refused, and the user was left with a shredded install that `current` still pointed at.
+
+    The directory is now renamed aside instead, which either works completely or not at
+    all. So the assertion is not merely that it refused -- it is that every file the user
+    had is still there.
     """
     target = core.versions_dir() / "9.9.9"
     target.mkdir(parents=True)
-    (target / "locked.dll").write_text("held open by a running instance")
+    (target / "yada.exe").write_text("the working executable")
+    (target / "_internal").mkdir()
+    (target / "_internal" / "python3.dll").write_text("held open by a running instance")
+    (target / ".complete").write_text("9.9.9\n")
+    before = sorted(p.relative_to(target).as_posix() for p in target.rglob("*"))
 
-    def refuse(path, *args, ignore_errors=False, **kwargs):
-        # Honour ignore_errors, so only the verified wipe fails and the incidental
-        # best-effort cleanups still behave as they do in reality.
-        if ignore_errors:
-            return
-        raise OSError(13, "Permission denied")
+    real_rename = core.os.rename
 
-    monkeypatch.setattr(github.shutil, "rmtree", refuse)
+    def refuse_moving_aside(src, dst):
+        # Only the swap's own move. `core.os` is the global os module, so refusing every
+        # rename also breaks the extraction that has to happen first -- which is how this
+        # test previously failed for the wrong reason.
+        if Path(dst).name.startswith(".trash-"):
+            raise OSError(5, "Access is denied")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(core.os, "rename", refuse_moving_aside)
 
     archive = _pack(tmp_path, "yada-9.9.9.tar.gz", as_zip=False)
-    with pytest.raises(github.UpdateError, match="could not clear"):
+    with pytest.raises(github.UpdateError, match="left intact"):
         github.extract_release(archive, "9.9.9")
 
-    assert (target / "locked.dll").exists(), "the old install is left intact"
-    assert not (target / ".complete").exists(), "a refused install must not be marked usable"
+    after = sorted(p.relative_to(target).as_posix() for p in target.rglob("*"))
+    assert after == before, "not one file of the working install may be lost"
+    assert (target / "yada.exe").read_text() == "the working executable"
+
+
+def test_a_failed_swap_puts_the_old_version_back(install_root, monkeypatch):
+    """If the new files cannot be moved in, the displaced version is restored.
+
+    Otherwise the window between "old moved aside" and "new moved in" is one where a
+    crash or an error leaves no install at all.
+    """
+    target = core.versions_dir() / "9.9.9"
+    target.mkdir(parents=True)
+    (target / "yada.exe").write_text("the working executable")
+    incoming = core.versions_dir() / ".incoming-9.9.9-1234"
+    incoming.mkdir()
+    (incoming / "yada.exe").write_text("the new executable")
+
+    real_rename = core.os.rename
+    calls = []
+
+    def rename_once(src, dst):
+        calls.append((src, dst))
+        real_rename(src, dst)
+
+    def refuse_replace(src, dst):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(core.os, "rename", rename_once)
+    monkeypatch.setattr(core.os, "replace", refuse_replace)
+
+    with pytest.raises(core.SwapFailed, match="could not move the new files"):
+        core.swap_in(incoming, target)
+
+    assert (target / "yada.exe").read_text() == "the working executable", (
+        "the displaced version must be restored, not left as a gap"
+    )
+    assert len(calls) == 2, "moved aside, then moved back"
+
+
+def test_a_replaced_version_that_cannot_be_deleted_is_left_for_later(install_root):
+    """A locked leftover must not fail the install, or count as a release."""
+    target = core.versions_dir() / "9.9.9"
+    target.mkdir(parents=True)
+    (target / "yada.exe").write_text("old")
+    (target / ".complete").write_text("9.9.9\n")
+    incoming = core.versions_dir() / ".incoming-9.9.9-1234"
+    incoming.mkdir()
+    (incoming / "yada.exe").write_text("new")
+    (incoming / ".complete").write_text("9.9.9\n")
+
+    core.swap_in(incoming, target)
+
+    assert (target / "yada.exe").read_text() == "new"
+    assert [v.version for v in core.installed_versions()] == ["9.9.9"], (
+        "a .trash- leftover must never appear as an installed version"
+    )
+
+
+def test_prune_clears_trash_left_by_an_earlier_swap(install_root):
+    """The leftover a locked file forces us to abandon gets collected on a later run."""
+    _install_fake("0.1.5")
+    trash = core.versions_dir() / ".trash-0.1.4-9999-abcd1234"
+    trash.mkdir(parents=True)
+    (trash / "python3.dll").write_text("was mapped at the time")
+
+    assert trash in core.abandoned_extractions()
+    core.prune_old_versions()
+    assert not trash.exists(), "the leftover is deleted once nothing holds it"
+    assert [v.version for v in core.installed_versions()] == ["0.1.5"]
 
 
 def test_an_interrupted_extraction_is_not_mistaken_for_a_release(install_root):

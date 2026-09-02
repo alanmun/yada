@@ -22,10 +22,12 @@ Consequences worth stating, because they are the point of the design:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -129,12 +131,68 @@ def installed_versions() -> list[InstalledVersion]:
     return sorted(found, key=lambda v: parse_version(v.version), reverse=True)
 
 
+# Prefixes of working directories under versions/. Dot-prefixed so `installed_versions`
+# skips them: a leftover must never occupy a retention slot or appear as a real release.
+LEFTOVER_PREFIXES = (".incoming-", ".trash-")
+
+
 def abandoned_extractions() -> list[Path]:
-    """Half-finished extraction directories, safe to delete."""
+    """Working directories left behind by an install, all safe to delete.
+
+    `.incoming-` is a half-finished extraction. `.trash-` is a version that was replaced
+    but could not be deleted at the time, because the copy running from it still had files
+    mapped -- so this runs again later, when that process is gone.
+    """
     root = versions_dir()
     if not root.is_dir():
         return []
-    return [p for p in root.iterdir() if p.is_dir() and p.name.startswith(".incoming-")]
+    return [p for p in root.iterdir() if p.is_dir() and p.name.startswith(LEFTOVER_PREFIXES)]
+
+
+class SwapFailed(OSError):
+    """A version directory could not be replaced -- and the existing one is untouched.
+
+    That second half is the guarantee callers rely on when writing the message they show:
+    whatever went wrong, the user's working install is still there.
+    """
+
+
+def swap_in(incoming: Path, target: Path) -> None:
+    """Move `incoming` to `target`, displacing any existing version directory.
+
+    Replaces an `shutil.rmtree(target)` that cost a user their working install. rmtree
+    deletes files one at a time, so when a still-running copy holds `python3.dll` mapped,
+    everything else in the directory is already gone by the time Windows refuses. What was
+    left behind was a shredded version directory that `current` still pointed at, and an
+    app that would not start -- from an install that had been healthy a moment earlier.
+
+    Renaming the old directory aside is all-or-nothing instead. Windows will not let you
+    delete a mapped file but will let you rename the directory containing it, so a locked
+    file leaves the existing install exactly as it was. It is also how a running copy
+    survives being replaced: its open handles follow the directory to its new name.
+    """
+    aside: Path | None = None
+    if target.exists():
+        aside = target.parent / f".trash-{target.name}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        try:
+            os.rename(target, aside)
+        except OSError as exc:
+            raise SwapFailed(
+                f"could not move the existing {target.name} directory aside ({exc})"
+            ) from exc
+    try:
+        os.replace(incoming, target)
+    except OSError as exc:
+        if aside is not None:
+            # A working old version beats no version at all.
+            with contextlib.suppress(OSError):
+                os.rename(aside, target)
+        raise SwapFailed(f"could not move the new files into {target.name} ({exc})") from exc
+
+    # Best effort: files still mapped by the copy we just displaced cannot be deleted yet.
+    # `abandoned_extractions` finds the leftover on a later run, once that process is gone.
+    if aside is not None:
+        shutil.rmtree(aside, ignore_errors=True)
 
 
 def read_current() -> str | None:

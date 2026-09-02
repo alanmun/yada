@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDoubleSpinBox,
+    QLineEdit,
     QScrollArea,
     QSlider,
     QVBoxLayout,
@@ -49,9 +50,20 @@ def _wheel(widget, delta: int = -120) -> QWheelEvent:
 
 
 def _page(qapp, control):
-    """A control inside a scroll area, as every settings control is."""
+    """A control inside a scroll area, as every settings control is.
+
+    Focus is parked on a separate widget rather than cleared. `clearFocus()` looks like it
+    works and does not: Qt focuses the first focusable widget of a shown window, so on a
+    real compositor the next event-loop turn hands focus straight back to the control under
+    test. The guard then allows the wheel -- correctly, since the control is focused -- and
+    the test that meant to prove the opposite passed offscreen and failed on a display.
+    Giving focus somewhere else establishes the premise instead of asserting it away, and
+    the assertion below means the tests can no longer pass for the wrong reason.
+    """
     inner = QWidget()
     layout = QVBoxLayout(inner)
+    sink = QLineEdit()  # first in the layout, so window activation focuses this
+    layout.addWidget(sink)
     layout.addWidget(control)
     for _ in range(40):  # make the page genuinely taller than the viewport
         layout.addWidget(QWidget())
@@ -61,10 +73,11 @@ def _page(qapp, control):
     area.resize(300, 120)
     area.show()
     qapp.processEvents()
-    # Qt focuses the first focusable widget in a shown window, so the control under test
-    # would arrive already focused -- which is the one case the guard deliberately allows.
-    control.clearFocus()
+    sink.setFocus()
     qapp.processEvents()
+    assert not control.hasFocus(), (
+        "the premise of an unfocused-control test must actually hold"
+    )
     return area
 
 

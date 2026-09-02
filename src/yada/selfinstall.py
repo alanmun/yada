@@ -27,11 +27,14 @@ from pathlib import Path
 
 from . import ipc
 from .updater.core import (
+    SwapFailed,
     executable_name,
+    install_root,
     prune_old_versions,
     versions_dir,
     write_current,
 )
+from .updater.core import swap_in as core_swap_in
 
 # How long to wait for an already-running copy to shut down before giving up on a clean
 # handover. Generous: it has a transcription to finish and sockets to release.
@@ -97,49 +100,61 @@ def payload_version() -> str:
 
 
 def stop_running_instance(*, timeout: float = SHUTDOWN_TIMEOUT) -> bool:
-    """Ask any running copy to quit, and wait for it to actually go.
+    """Ask any running copy to quit, and make sure it has actually gone.
 
     Necessary rather than polite. On Windows a running instance holds its own executable
     and DLLs open, so replacing the version directory it occupies fails -- and installing
     while it runs leaves two copies fighting over one command socket and one microphone.
+
+    This used to wait for the IPC socket to close, which is the wrong signal by a wide
+    margin: the command server stops early in shutdown, so the socket goes quiet while the
+    process is still running with its DLLs mapped. The wait now watches the processes
+    themselves, and a copy that ignores the request is ended rather than left in place.
+    Being told to go and close an app that is not responding is not an answer, and sparing
+    the user that is the whole reason this function exists.
     """
     import time
 
-    if not ipc.is_running():
+    from . import procutil
+
+    running = procutil.processes_under(install_root())
+    if not running and not ipc.is_running():
         return True
-    ipc.send_command("quit")
+
+    ipc.send_command("quit")  # a no-op if nothing is listening
 
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not ipc.is_running():
-            # The socket is closed; give the process a moment to release its files.
-            time.sleep(1.0)
+    while True:
+        running = [pid for pid in running if procutil.pid_alive(pid)]
+        if not running and not ipc.is_running():
             return True
+        if time.monotonic() >= deadline:
+            break
         time.sleep(0.25)
-    return False
+
+    if running and procutil.terminate(running):
+        return False
+    # Nothing of ours is running now. A socket still answering at this point belongs to a
+    # copy somewhere else entirely -- another extracted archive, say -- and killing that
+    # is not ours to do, so report the failure and let the message explain.
+    return not ipc.is_running()
 
 
-def _empty_target(target: Path) -> None:
-    """Remove `target` completely, or raise.
+def _swap_in(incoming: Path, target: Path) -> None:
+    """Install `incoming` over `target`, keeping the old version if anything goes wrong.
 
-    Deliberately not ignore_errors: a surviving locked file plus a fresh extraction on top
-    produces a version directory made of two releases.
+    The guarantee comes from `core.swap_in`: on failure the existing install is untouched,
+    so the message can say so plainly. An earlier version of this deleted the target file
+    by file and could leave it half gone, which is the one outcome a user cannot recover
+    from without downloading again.
     """
-    if not target.exists():
-        return
     try:
-        shutil.rmtree(target)
-    except OSError as exc:
+        core_swap_in(incoming, target)
+    except SwapFailed as exc:
         raise InstallError(
             f"Could not replace the existing {target.name} install ({exc}).\n"
-            "Something is still using a file inside it. Quit yada from its tray icon and "
-            "try again."
+            "Your working copy has been left exactly as it was."
         ) from exc
-    if target.exists():
-        raise InstallError(
-            f"Could not fully remove the existing {target.name} install.\n"
-            "Installing over it would mix two versions."
-        )
 
 
 def install(*, version: str | None = None) -> Path:
@@ -171,8 +186,7 @@ def install(*, version: str | None = None) -> Path:
         if sys.platform != "win32":
             exe_path.chmod(0o755)
 
-        _empty_target(target)
-        os.replace(incoming, target)
+        _swap_in(incoming, target)
     except BaseException:
         shutil.rmtree(incoming, ignore_errors=True)
         raise
@@ -232,8 +246,11 @@ def install_and_relaunch() -> tuple[bool, str]:
     """The whole first-run path. Returns (success, message for the user)."""
     version = payload_version()
     if not stop_running_instance():
+        # Reached only when a copy could not be ended: one running from outside the
+        # install location, or a process this user cannot signal. A running copy of the
+        # install itself is now closed rather than complained about.
         return False, (
-            "yada is already running and did not respond to a request to quit.\n\n"
+            "Another copy of yada is running and could not be closed automatically.\n\n"
             "Quit it from its tray icon, then try again."
         )
     try:

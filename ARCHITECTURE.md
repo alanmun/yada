@@ -225,16 +225,44 @@ them. CI also verifies that the signature it just produced validates against the
 *compiled into the binaries being shipped*, so pasting the wrong half of a keypair fails the
 release instead of publishing something every client refuses.
 
-**A version directory contains exactly one release.** Extraction builds into
-`.incoming-<v>-<pid>` and renames into place, and the previous directory is removed with a
-*verified* delete rather than a best-effort one. The earlier code passed
-`ignore_errors=True` and then extracted into whatever survived, so one locked file — a DLL
-still held by a running instance is the obvious case on Windows — meant the new files
-landed alongside the old ones and `.complete` marked the mixture as trustworthy. Now the
-install refuses with something actionable instead, which is the better trade: "close yada
-and try again" beats a build made of two releases. An interrupted extraction leaves an
-ignorable `.incoming-` directory, which is skipped by `installed_versions()` so it cannot
-occupy a retention slot, and is cleared on the next prune.
+**A version directory contains exactly one release, or the one it already had.**
+Extraction builds into `.incoming-<v>-<pid>` and renames into place. Getting the *previous*
+directory out of the way took three attempts, and the two failures are worth recording
+because each looked correct.
+
+First it was `shutil.rmtree(..., ignore_errors=True)`, then extraction into whatever
+survived — so one locked file meant the new release landed alongside the old one and
+`.complete` marked the mixture as trustworthy. That became a *verified* `rmtree`, which
+refused instead of merging. Better, and still wrong in the worst way: rmtree deletes file
+by file. A running copy on Windows holds `python3.dll` mapped and nothing else, so by the
+time the delete failed, every other file was already gone. A user who double-clicked 0.1.10
+while 0.1.10 was running got a shredded install that `current` still pointed at, and an app
+that would not start — from a working install, one second earlier.
+
+Now `core.swap_in` renames the old directory aside and only then moves the new one in. A
+rename is all-or-nothing, so a locked file leaves the existing install **exactly** as it
+was; if the second move fails, the old directory is renamed back. The displaced directory
+is deleted best-effort as `.trash-<v>-<pid>-<rand>` and collected by a later prune if
+something still holds it. Both `.incoming-` and `.trash-` are dot-prefixed, so
+`installed_versions()` skips them and a leftover can never occupy a retention slot or
+appear as a release.
+
+**Installing over a running copy means ending it, and nothing else works.** Measured on
+Windows 11, against a real running build: deleting a mapped DLL is refused, and *renaming
+the directory that contains it is refused too* — so the swap above is a safety net, not a
+way to replace a live install. The only thing that works is the process actually exiting.
+`selfinstall.stop_running_instance` therefore asks over IPC, then watches the **processes**
+until they are gone, and terminates any that ignore the request.
+
+It used to wait for `ipc.is_running()` to go false, which is the wrong signal by a wide
+margin: `CommandServer.stop()` runs early in shutdown, so the socket goes quiet seconds
+before the process releases its files — and a one-second grace after that was what
+authorised the delete described above. `procutil` finds them by executable path
+(`EnumProcesses` + `QueryFullProcessImageNameW` on Windows, `/proc/<pid>/exe` on Linux)
+rather than by asking politely, so it also works against copies of yada built before any
+of this existed. On Linux a zombie reads as *gone*: signal 0 still succeeds against an
+unreaped process, and treating it as alive would burn the whole timeout waiting for a
+process that had already exited.
 
 **Disk retention.** A version directory is roughly 190 MB, so this is not housekeeping
 trivia. The two newest releases are kept and the rest deleted, and `staging/` is emptied
@@ -293,6 +321,8 @@ src/yada/
   ui/               tray, settings window
   updater/          install layout, GitHub releases, verification, background service
   relaunch.py       handing over to a newer installed version
+  selfinstall.py    the app installs itself; there is no separate installer binary
+  procutil.py       is that process still running, and end it if it will not go
 ```
 
 ## Config and secrets
