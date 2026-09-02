@@ -18,6 +18,7 @@ Usage:
   yada settings        Open the settings window
   yada stop            Quit the running instance
   yada status          Report whether yada is running
+  yada doctor          Check whether this machine can run yada, and what is missing
   yada --version       Print the version
   yada --help          Show this message
 
@@ -57,6 +58,13 @@ def main(argv: list[str] | None = None) -> int:
         # useful than reporting an error to a keypress.
         print("yada is not running — starting it.")
         return _run_app(start_recording=(command == "toggle"))
+
+    if command == "doctor":
+        # Deliberately ahead of the IPC checks: doctor must work whether or not yada is
+        # running, and it is the first thing to reach for when it will not start.
+        from .doctor import main as doctor_main
+
+        return doctor_main()
 
     if command == "status":
         running = ipc.is_running()

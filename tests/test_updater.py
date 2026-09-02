@@ -270,3 +270,20 @@ def test_pruning_keeps_running_version(install_root):
     remaining = {v.version for v in core.installed_versions()}
     assert "0.1.0" in remaining, "must never delete the version currently in use"
     assert "0.4.0" in remaining and "0.3.0" in remaining
+
+
+async def test_public_key_is_read_at_call_time_not_import_time(install_root, server,
+                                                               signing_key, monkeypatch):
+    """The module constant must be live.
+
+    An earlier version took the key as a default argument value, which bound it at import
+    time. Setting RELEASE_PUBLIC_KEY_B64 afterwards then had no effect, and a correctly
+    signed release was rejected as unsigned.
+    """
+    serve_dir, base_url = server
+    key, pub = signing_key
+    release = _publish(serve_dir, base_url, "0.4.0", key)
+
+    monkeypatch.setattr(github, "RELEASE_PUBLIC_KEY_B64", pub)
+    archive = await github.download_and_verify(release)  # no explicit key
+    assert archive.exists()

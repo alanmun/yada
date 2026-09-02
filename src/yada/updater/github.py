@@ -224,10 +224,18 @@ async def download_and_verify(
     release: Release,
     *,
     allow_unsigned: bool = False,
-    public_key_b64: str = RELEASE_PUBLIC_KEY_B64,
+    public_key_b64: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> Path:
-    """Fetch this platform's archive and prove it is authentic. Returns the archive path."""
+    """Fetch this platform's archive and prove it is authentic. Returns the archive path.
+
+    `public_key_b64` resolves to RELEASE_PUBLIC_KEY_B64 when omitted. It is looked up here
+    rather than used as a default argument value on purpose: a default would bind the
+    constant at import time, which silently freezes it and makes the key impossible to
+    override or to exercise in a test.
+    """
+    if public_key_b64 is None:
+        public_key_b64 = RELEASE_PUBLIC_KEY_B64
     asset = release.platform_asset()
     if asset is None:
         raise UpdateError(f"release {release.tag} has no asset for this platform")
