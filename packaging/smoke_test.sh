@@ -36,6 +36,8 @@ export XDG_CONFIG_HOME="$WORK/home/.config"
 export XDG_CACHE_HOME="$WORK/home/.cache"
 mkdir -p "$HOME"
 
+export YADA_INSTALLER_NO_PAUSE=1  # the installer must never block on input here
+
 pass() { echo "  ok   $1"; }
 fail() { echo "  FAIL $1" >&2; exit 1; }
 
@@ -66,13 +68,27 @@ echo "=== 3. the double-click installer works ==="
 pass "installed $(cat "$YADA_INSTALL_ROOT/current")"
 
 echo "=== 4. the installed app boots, answers IPC, and shuts down ==="
-"$YADA_INSTALL_ROOT/yada$EXE" &
+# Output goes to a file, not the step's pipe. A backgrounded GUI process that inherits the
+# runner's stdout keeps the handle open, and the step then hangs long after the script is
+# finished -- which is exactly how this cost a six-hour Windows job.
+APP_LOG="$WORK/app.log"
+"$YADA_INSTALL_ROOT/yada$EXE" > "$APP_LOG" 2>&1 &
+APP_PID=$!
+show_app_log() {
+  echo "     --- app output ---"
+  sed 's/^/     /' "$APP_LOG" 2>/dev/null || echo "     (no output captured)"
+}
 started=0
 for _ in $(seq 1 60); do
   if "$YADA_INSTALL_ROOT/yada$EXE" status >/dev/null 2>&1; then started=1; break; fi
   sleep 0.5
 done
-[ "$started" = "1" ] || { echo "     app never answered its socket"; "$YADA_INSTALL_ROOT/yada$EXE" status || true; fail "app did not start"; }
+if [ "$started" != "1" ]; then
+  echo "     app never answered its socket after 30s"
+  show_app_log
+  kill "$APP_PID" 2>/dev/null || true
+  fail "app did not start"
+fi
 pass "app started and answered status"
 
 "$YADA_INSTALL_ROOT/yada$EXE" stop >/dev/null 2>&1 || fail "stop command failed"
@@ -81,8 +97,14 @@ for _ in $(seq 1 20); do
   if ! "$YADA_INSTALL_ROOT/yada$EXE" status >/dev/null 2>&1; then stopped=1; break; fi
   sleep 0.5
 done
-[ "$stopped" = "1" ] || fail "app did not shut down"
+if [ "$stopped" != "1" ]; then
+  show_app_log
+  kill "$APP_PID" 2>/dev/null || true
+  fail "app did not shut down"
+fi
 pass "app shut down cleanly"
+# Belt and braces: never leave a process holding the runner's handles.
+wait "$APP_PID" 2>/dev/null || true
 
 echo
 echo "SMOKE TEST PASSED — the built binaries run on $(uname -s)"

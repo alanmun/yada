@@ -30,6 +30,7 @@ jobs:
             platform: windows-x86_64
             archive: zip
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -114,6 +115,8 @@ jobs:
           fi
 
       - name: Smoke test the built application
+        # Bounded on purpose. Without this a hang runs until the 6-hour job limit.
+        timeout-minutes: 8
         # The point of this job: prove the binaries actually start on a real machine of
         # this OS before anything is published, instead of finding out from a user.
         # Exercises the frozen import graph, the installer, and a launch/IPC/stop cycle.

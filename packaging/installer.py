@@ -206,8 +206,11 @@ def main() -> int:
         return 1
     finally:
         # Double-clicked from Explorer the console closes instantly on exit, taking any
-        # error message with it. Only pause when there is a human watching.
-        if IS_WINDOWS and sys.stdin is not None and sys.stdin.isatty():
+        # error message with it, so pause for a human. But never in automation: Git Bash on
+        # a Windows CI runner reports stdin as a tty, and a blocking prompt there hangs the
+        # job until it is killed hours later.
+        automated = os.environ.get("CI") or os.environ.get("YADA_INSTALLER_NO_PAUSE")
+        if IS_WINDOWS and not automated and sys.stdin is not None and sys.stdin.isatty():
             with contextlib.suppress(EOFError, KeyboardInterrupt):
                 input("\nPress Enter to close…")
 
