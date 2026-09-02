@@ -37,7 +37,7 @@ SIGNATURE_ASSET = "SHA256SUMS.sig"
 # Ed25519 public key (base64, 32 raw bytes) matching the release-signing private key held
 # by CI. Empty until release signing is set up; while empty, updates require
 # allow_unsigned=True, so the app cannot silently auto-execute unverified code.
-RELEASE_PUBLIC_KEY_B64 = ""
+RELEASE_PUBLIC_KEY_B64 = "F5fn7kam56z7MD2oe9BZuTotEJHSHCYJXzlaLOE4m3w="
 
 
 class UpdateError(Exception):
