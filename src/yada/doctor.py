@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import threading
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from . import config, secrets
@@ -108,18 +110,28 @@ def _audio_checks() -> list[Check]:
 
 
 def _qt_checks() -> list[Check]:
+    """Whether a system tray exists.
+
+    Answering needs a live QApplication, which is the single most likely thing in this
+    whole report to block: constructing one touches the window system, and in a service
+    session or over a broken display connection it can sit there indefinitely. The
+    per-group deadline in _run_group is what makes attempting it safe.
+    """
     try:
         from PySide6.QtWidgets import QApplication, QSystemTrayIcon
     except ImportError as exc:
         return [Check("Tray icon", FAIL, f"PySide6 is not installed ({exc})", "uv sync")]
 
-    owned = QApplication.instance() is None
-    app = QApplication([]) if owned else None
+    existing = QApplication.instance()
+    app = existing or QApplication([])
     try:
         available = QSystemTrayIcon.isSystemTrayAvailable()
     finally:
-        if owned and app is not None:
-            app.shutdown() if hasattr(app, "shutdown") else None
+        if existing is None:
+            # Tear it down rather than leaving a live QApplication in the process; on
+            # Windows a dangling one can stall interpreter shutdown.
+            app.quit()
+            del app
 
     if available:
         return [Check("Tray icon", OK, "a system tray is available")]
@@ -260,33 +272,79 @@ def _path_checks() -> list[Check]:
     return [Check("Paths", OK, "\n      ".join(lines))]
 
 
-def run_checks() -> list[Check]:
-    checks: list[Check] = []
-    for group in (
-        _platform_checks,
-        _audio_checks,
-        _qt_checks,
-        _hotkey_checks,
-        _paste_checks,
-        _credential_checks,
-        _install_checks,
-        _path_checks,
-    ):
+# Some checks talk to hardware or the window system and can block indefinitely:
+# PortAudio device enumeration and QApplication construction are both capable of it,
+# depending on drivers and session type. A diagnostic tool that hangs is worse than no
+# tool at all, so every group runs with a deadline.
+CHECK_TIMEOUT_SECONDS = 20.0
+
+GROUPS: tuple[tuple[str, Callable[[], list[Check]]], ...] = ()
+
+
+def _run_group(name: str, group: Callable[[], list[Check]]) -> list[Check]:
+    """Run one group on a daemon thread and give up on it if it stalls.
+
+    A daemon thread cannot be killed, but it also cannot keep the process alive, so a
+    wedged driver call costs one timed-out line rather than a hung command.
+    """
+    result: list[Check] = []
+    error: list[BaseException] = []
+
+    def target() -> None:
         try:
-            checks.extend(group())
-        except Exception as exc:  # noqa: BLE001 - a broken check must not hide the others
-            checks.append(Check(group.__name__.strip("_"), FAIL, f"check failed: {exc}"))
-    return checks
+            result.extend(group())
+        except BaseException as exc:  # noqa: BLE001 - report, never propagate
+            error.append(exc)
+
+    thread = threading.Thread(target=target, name=f"doctor-{name}", daemon=True)
+    thread.start()
+    thread.join(CHECK_TIMEOUT_SECONDS)
+
+    if thread.is_alive():
+        return [
+            Check(
+                name,
+                FAIL,
+                f"check did not finish within {CHECK_TIMEOUT_SECONDS:.0f}s and was abandoned",
+                "This usually means a driver or the window system is not responding. "
+                "The rest of the report below is still valid.",
+            )
+        ]
+    if error:
+        return [Check(name, FAIL, f"check failed: {error[0]}")]
+    return result
+
+
+def iter_checks() -> Iterator[Check]:
+    """Yield checks as they complete, so output appears even if a later one stalls."""
+    for name, group in (
+        ("Platform", _platform_checks),
+        ("Microphone", _audio_checks),
+        ("Tray icon", _qt_checks),
+        ("Shortcut", _hotkey_checks),
+        ("Auto-paste", _paste_checks),
+        ("Credentials", _credential_checks),
+        ("Install", _install_checks),
+        ("Paths", _path_checks),
+    ):
+        yield from _run_group(name, group)
+
+
+def run_checks() -> list[Check]:
+    return list(iter_checks())
 
 
 def main() -> int:
-    checks = run_checks()
-    print("yada doctor\n")
-    for check in checks:
-        print(f"[{MARKS[check.status]}] {check.name}: {check.detail}")
+    # Header first, then a line per check as it finishes. If something stalls, the output
+    # already names everything that passed and stops at the culprit.
+    print("yada doctor\n", flush=True)
+    checks: list[Check] = []
+    for check in iter_checks():
+        checks.append(check)
+        print(f"[{MARKS[check.status]}] {check.name}: {check.detail}", flush=True)
         if check.fix:
             for line in check.fix.splitlines():
-                print(f"          {line}")
+                print(f"          {line}", flush=True)
     failures = [c for c in checks if c.status == FAIL]
     warnings = [c for c in checks if c.status == WARN]
     print()
