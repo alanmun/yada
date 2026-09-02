@@ -85,6 +85,10 @@ class UpdateService:
         self.status = UpdateStatus()
         self._on_change = on_change
         self._task: asyncio.Task | None = None
+        # One check at a time. Two overlapping downloads used to write the same file and
+        # the loser failed with a bare "[Errno 2] ... .zip.part". Easy to trigger now that
+        # the tray action and the settings button both start one.
+        self._checking = asyncio.Lock()
 
     # -- lifecycle ----------------------------------------------------------------------
 
@@ -119,8 +123,16 @@ class UpdateService:
     async def check_now(self) -> UpdateStatus:
         """Check, and if there is something newer, fetch and stage it.
 
-        Never raises: an update failure must not be able to disturb a running app.
+        Never raises: an update failure must not be able to disturb a running app. A
+        second call while one is already running is ignored rather than queued -- asking
+        twice means "tell me now", not "download it twice".
         """
+        if self._checking.locked():
+            return self.status
+        async with self._checking:
+            return await self._check_now()
+
+    async def _check_now(self) -> UpdateStatus:
         self.status.checking = True
         self.status.last_error = None
         self._notify()

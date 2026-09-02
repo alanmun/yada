@@ -829,6 +829,19 @@ class SettingsWindow(QWidget):
     def set_update_status(self, text: str) -> None:
         self.update_status.setText(text)
 
+    def focus_tab(self, title: str) -> bool:
+        """Select a tab by its label. Returns False if there is no such tab.
+
+        By label rather than index: the tab order has already changed twice, and a
+        hardcoded index silently selects the wrong page when it changes again.
+        """
+        for index in range(self.tabs.count()):
+            # Tab labels carry Qt mnemonic escaping, e.g. "Audio && output".
+            if self.tabs.tabText(index).replace("&&", "&") == title:
+                self.tabs.setCurrentIndex(index)
+                return True
+        return False
+
     # ==================================================================================
     # Load / collect
     # ==================================================================================

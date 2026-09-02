@@ -18,6 +18,7 @@ relaunches from there.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -27,7 +28,6 @@ from pathlib import Path
 from . import ipc
 from .updater.core import (
     executable_name,
-    install_root,
     prune_old_versions,
     versions_dir,
     write_current,
@@ -150,7 +150,6 @@ def install(*, version: str | None = None) -> Path:
     if not (here / exe).exists():
         raise InstallError(f"This folder does not contain {exe}. Extract the whole archive.")
 
-    root = install_root()
     versions = versions_dir()
     versions.mkdir(parents=True, exist_ok=True)
     target = versions / version
@@ -183,7 +182,12 @@ def install(*, version: str | None = None) -> Path:
     (target / ".complete").write_text(version + "\n", encoding="utf-8")
     write_current(version)
 
-    shutil.rmtree(root / "staging", ignore_errors=True)
+    # Stale leftovers only: another copy may have a download in flight, and wiping the
+    # folder makes it fail with a bare errno.
+    from .updater.github import clear_stale_downloads
+
+    with contextlib.suppress(OSError):
+        clear_stale_downloads()
     prune_old_versions()
     return target / exe
 

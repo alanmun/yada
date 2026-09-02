@@ -23,6 +23,8 @@ import os
 import shutil
 import sys
 import tarfile
+import time
+import uuid
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,7 +32,7 @@ from pathlib import Path
 
 import httpx
 
-from .core import install_root, is_newer, staging_dir, versions_dir
+from .core import is_newer, staging_dir, versions_dir
 
 GITHUB_API = "https://api.github.com"
 CHECKSUM_ASSET = "SHA256SUMS"
@@ -186,8 +188,25 @@ ProgressFn = Callable[[int, int], None]
 
 
 async def _download(url: str, dest: Path, *, on_progress: ProgressFn | None = None) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    partial = dest.with_suffix(dest.suffix + ".part")
+    """Stream `url` to `dest`, via a `.part` file so a partial download is never mistaken
+    for a finished one.
+
+    Filesystem errors are translated deliberately. Only httpx errors used to be caught, so
+    an OSError escaped as a raw "[Errno 2] No such file or directory: ...zip.part" with
+    nothing for the user to act on. The interesting case is the archive disappearing
+    mid-download: antivirus scans a freshly written executable-bearing archive and can
+    delete it before the rename, which is a real and repeated occurrence rather than a
+    theoretical one.
+    """
+    # Unique per process and per call. Two downloads sharing one .part path is a real
+    # collision: whichever finished first renamed it away, and the other then failed with
+    # "[Errno 2] ... .zip.part" -- which looked like antivirus but was self-inflicted.
+    partial = dest.with_suffix(f"{dest.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise UpdateError(f"could not create the download folder: {exc}") from exc
+
     try:
         async with (
             httpx.AsyncClient(follow_redirects=True, timeout=None) as client,
@@ -204,11 +223,40 @@ async def _download(url: str, dest: Path, *, on_progress: ProgressFn | None = No
                     if on_progress:
                         on_progress(done, total)
     except httpx.HTTPError as exc:
-        partial.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            partial.unlink(missing_ok=True)
         raise UpdateError(f"download failed: {exc}") from exc
-    # Only becomes the real filename once complete, so a partial file is never mistaken
-    # for a finished one.
-    partial.replace(dest)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            partial.unlink(missing_ok=True)
+        raise UpdateError(_download_os_error_message(exc, partial)) from exc
+
+    try:
+        partial.replace(dest)
+    except FileNotFoundError as exc:
+        raise UpdateError(
+            "The downloaded update disappeared before it could be saved. Either another "
+            "copy of yada cleared the download folder, or security software removed the "
+            "file. It will be retried at the next check."
+        ) from exc
+    except OSError as exc:
+        raise UpdateError(_download_os_error_message(exc, partial)) from exc
+
+
+def _download_os_error_message(exc: OSError, partial: Path) -> str:
+    """Turn a filesystem error during download into something actionable."""
+    import errno
+
+    if exc.errno == errno.ENOENT:
+        return (
+            "The download vanished while it was being written. Either another copy of "
+            "yada cleared the download folder, or security software removed the file."
+        )
+    if exc.errno == errno.ENOSPC:
+        return f"Not enough disk space to download the update to {partial.parent}."
+    if exc.errno in (errno.EACCES, errno.EPERM):
+        return f"No permission to write the update to {partial.parent}."
+    return f"could not save the download: {exc}"
 
 
 async def _fetch_bytes(url: str) -> bytes:
@@ -405,6 +453,28 @@ def _flatten_single_dir(target: Path) -> None:
         holding.rmdir()
 
 
-def clear_staging() -> None:
-    shutil.rmtree(staging_dir(), ignore_errors=True)
-    install_root().mkdir(parents=True, exist_ok=True)
+# Anything left in staging older than this is certainly abandoned: a download that has
+# made no progress for hours is not going to finish.
+STALE_DOWNLOAD_SECONDS = 6 * 3600
+
+
+def clear_stale_downloads(max_age_seconds: float = STALE_DOWNLOAD_SECONDS) -> list[str]:
+    """Delete abandoned downloads, leaving anything recent alone.
+
+    Emphatically not a blanket wipe of the folder. Doing that at startup destroyed a
+    download another copy of yada had in flight, and the victim then failed with a bare
+    "[Errno 2] ... .zip.part" that read as antivirus interference.
+    """
+    directory = staging_dir()
+    if not directory.is_dir():
+        return []
+    cutoff = time.time() - max_age_seconds
+    removed: list[str] = []
+    for item in directory.iterdir():
+        try:
+            if item.is_file() and item.stat().st_mtime < cutoff:
+                item.unlink()
+                removed.append(item.name)
+        except OSError:
+            continue
+    return removed

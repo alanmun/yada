@@ -126,3 +126,28 @@ def test_restart_button_only_appears_with_a_staged_update(window):
     assert "0.2.0" in window.restart_button.text()
     window.set_update_ready(None)
     assert _shown(window.restart_button) is False
+
+
+def test_focus_tab_finds_tabs_by_label(window):
+    """By label, not index. The tab order has changed twice already, and a hardcoded
+    index silently selects the wrong page the next time it moves."""
+    assert window.focus_tab("Updates") is True
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Updates"
+
+    # Labels carry Qt's mnemonic escaping; callers should not have to know that.
+    assert window.focus_tab("Audio & output") is True
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Audio && output"
+
+    assert window.focus_tab("Providers") is True
+    assert window.focus_tab("No Such Tab") is False
+
+
+def test_reopening_the_window_does_not_discard_a_pending_edit(window, monkeypatch):
+    """show_settings reloads every field from settings, so anything still sitting in the
+    autosave debounce has to be written first."""
+    window.always_copy.setChecked(False)
+    assert window._save_timer.isActive(), "sanity: the change is still debounced"
+
+    window.flush_pending_save()
+    assert window._saves, "the pending change must be committed, not dropped"
+    assert window._saves[-1].output.always_copy_to_clipboard is False

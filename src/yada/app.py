@@ -204,16 +204,18 @@ class YadaApp(QObject):
         190 MB. Doing it at startup means disk is reclaimed even if updates are switched
         off entirely.
 
-        Nothing in staging is ever resumed, so a leftover archive there is pure waste.
-        Safe at startup specifically: the first update check is a minute away, so no
-        download can be in flight yet.
+        Only genuinely stale downloads are removed. Clearing the folder wholesale is not
+        safe even at startup: another copy of yada may have a download in flight, and it
+        then fails with a bare errno that reads like antivirus interference.
         """
-        import shutil
+        from .updater import prune_old_versions
+        from .updater.github import clear_stale_downloads
 
-        from .updater import prune_old_versions, staging_dir
-
+        # Only abandoned downloads. Wiping the folder outright destroyed a download that
+        # another copy of yada had in flight, which then failed with a bare errno.
         with contextlib.suppress(OSError):
-            shutil.rmtree(staging_dir(), ignore_errors=True)
+            if dropped := clear_stale_downloads():
+                print(f"yada: removed abandoned download(s): {', '.join(dropped)}")
         try:
             if removed := prune_old_versions():
                 print(f"yada: removed superseded version(s): {', '.join(removed)}")
@@ -507,6 +509,10 @@ class YadaApp(QObject):
             window.restart_requested.connect(self.restart)
             self.settings_window = window
         else:
+            # Reloading resets every field from settings, so anything still sitting in the
+            # autosave debounce has to be written first or it is silently discarded.
+            self.settings_window.flush_pending_save()
+            self.settings_window.flush_pending_keys()
             self.settings_window.load(self.settings)
         self._push_status_to_settings()
         self._refresh_stale_models()
@@ -515,6 +521,17 @@ class YadaApp(QObject):
         self.settings_window.activateWindow()
 
     def check_updates(self) -> None:
+        """Show the window on the Updates tab, then run the check.
+
+        Triggered from the tray it used to only schedule the coroutine: nothing opened,
+        nothing visibly changed, and there was no way to tell whether it had done anything
+        at all. The status line on that tab is the result, so the tab has to be in front of
+        the user for the action to mean anything. Harmless when the settings window is
+        already open there, which is the other way in.
+        """
+        self.show_settings()
+        if self.settings_window is not None:
+            self.settings_window.focus_tab("Updates")
         if self._updates is None:
             return
         asyncio.run_coroutine_threadsafe(self._updates.check_now(), self.loop)
@@ -772,7 +789,7 @@ class YadaApp(QObject):
             self.tray.notify("yada", message[len(self.NOT_CONFIGURED) :], warning=True)
             self.show_settings()
             if self.settings_window is not None:
-                self.settings_window.tabs.setCurrentIndex(0)
+                self.settings_window.focus_tab("Providers")
             return
         self.tray.notify("yada", message, warning=True)
 

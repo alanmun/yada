@@ -6,13 +6,16 @@ downloaded, so the tests that matter most are the ones asserting it *refuses* to
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import hashlib
 import http.server
+import os
 import sys
 import tarfile
 import threading
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -553,3 +556,102 @@ def test_a_file_vanishing_mid_unpack_is_reported_as_such(install_root, tmp_path,
     monkeypatch.setattr(github.shutil, "move", move_but_lose_one)
     with pytest.raises(github.UpdateError, match="Antivirus"):
         github.extract_release(archive, "7.7.8")
+
+
+async def test_a_download_removed_mid_flight_is_explained(install_root, server, signing_key):
+    """A raw "[Errno 2] ... .zip.part" told the user nothing.
+
+    The real cause on the machine this was reported from was two checks writing the same
+    part file, not antivirus -- checked against Defender's detection history, which had
+    nothing for that version. So the message names both possibilities and neither as fact.
+    """
+    serve_dir, base_url = server
+    key, pub = signing_key
+    release = _publish(serve_dir, base_url, "0.4.1", key)
+
+    real_replace = github.Path.replace
+
+    def vanish(self, target):
+        if str(self).endswith(".part"):
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_replace(self, target)
+
+    github.Path.replace = vanish
+    try:
+        with pytest.raises(github.UpdateError, match="disappeared before it could be saved"):
+            await github.download_and_verify(release, public_key_b64=pub)
+    finally:
+        github.Path.replace = real_replace
+
+
+async def test_no_disk_space_is_reported_as_such(install_root, server, signing_key):
+    import errno
+
+    serve_dir, base_url = server
+    key, pub = signing_key
+    release = _publish(serve_dir, base_url, "0.4.2", key)
+
+    real_open = github.Path.open
+
+    def full(self, *a, **k):
+        if str(self).endswith(".part"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(self, *a, **k)
+
+    github.Path.open = full
+    try:
+        with pytest.raises(github.UpdateError, match="disk space"):
+            await github.download_and_verify(release, public_key_b64=pub)
+    finally:
+        github.Path.open = real_open
+
+
+def test_part_files_are_unique_per_download(install_root):
+    """Two downloads must not write the same file.
+
+    They did, and whichever finished first renamed it away, leaving the other to fail with
+    "[Errno 2] ... .zip.part" -- which read as antivirus but was self-inflicted.
+    """
+    dest = core.staging_dir() / "yada-1.0.0-windows-x86_64.zip"
+    names = {
+        dest.with_suffix(f"{dest.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part").name
+        for _ in range(20)
+    }
+    assert len(names) == 20, "part file names must not collide"
+    assert all(n.endswith(".part") for n in names)
+
+
+def test_only_stale_downloads_are_cleared(install_root):
+    """A recent download may belong to another copy of yada that is still using it."""
+    staging = core.staging_dir()
+    staging.mkdir(parents=True, exist_ok=True)
+    fresh = staging / "in-flight.zip.part"
+    old = staging / "abandoned.zip.part"
+    fresh.write_bytes(b"x")
+    old.write_bytes(b"x")
+    os.utime(old, (0, 0))  # long abandoned
+
+    removed = github.clear_stale_downloads()
+
+    assert removed == ["abandoned.zip.part"]
+    assert fresh.exists(), "a recent download must be left alone"
+    assert not old.exists()
+
+
+async def test_a_second_check_while_one_is_running_is_ignored(install_root, monkeypatch):
+    """Asking twice means "tell me now", not "download it twice"."""
+    from yada.updater import service as svc
+
+    started = 0
+
+    async def slow_fetch(repo, **kwargs):
+        nonlocal started
+        started += 1
+        await asyncio.sleep(0.2)
+        return None
+
+    monkeypatch.setattr(svc, "fetch_latest", slow_fetch)
+    s = svc.UpdateService(repo="x/y", current_version="1.0.0")
+
+    await asyncio.gather(s.check_now(), s.check_now(), s.check_now())
+    assert started == 1, f"expected one check, {started} ran"
