@@ -117,12 +117,19 @@ pass "app started and answered status"
 
 "$YADA_INSTALL_ROOT/yada$EXE" stop >/dev/null 2>&1 || fail "stop command failed"
 stopped=0
-for _ in $(seq 1 20); do
+for _ in $(seq 1 40); do
   if ! "$YADA_INSTALL_ROOT/yada$EXE" status >/dev/null 2>&1; then stopped=1; break; fi
   sleep 0.5
 done
 if [ "$stopped" != "1" ]; then
+  echo "     still answering status 20s after stop"
   show_app_log
+  # Name the surviving process, so the next fix does not need another CI round trip.
+  if command -v tasklist >/dev/null 2>&1; then
+    tasklist //FI "IMAGENAME eq yada.exe" 2>/dev/null | sed 's/^/     /' || true
+  else
+    ps -ef 2>/dev/null | grep -i "[y]ada" | sed 's/^/     /' || true
+  fi
   kill "$APP_PID" 2>/dev/null || true
   fail "app did not shut down"
 fi

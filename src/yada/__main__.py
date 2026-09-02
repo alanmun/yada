@@ -8,19 +8,29 @@ in Qt first would add a visible delay to the one action that has to feel instant
 
 from __future__ import annotations
 
+import contextlib
 import sys
 
 
-def _attach_parent_console() -> None:
-    """On Windows, reattach to the calling terminal so CLI output is actually visible.
+def _prepare_console() -> None:
+    """On Windows, make CLI output both visible and encodable.
 
     yada.exe is built for the GUI subsystem, because a tray app must not flash a console
     window on every launch. The cost is that it starts with no stdout at all: run
     `yada doctor` from PowerShell and it prints nothing, succeeds, and tells you nothing.
 
-    AttachConsole(ATTACH_PARENT_PROCESS) borrows the terminal that launched us, then the
-    standard streams are reopened onto it. Fails harmlessly when there is no parent console
-    (launched from a shortcut, or from the hotkey), which is exactly when nobody is reading.
+    Two separate problems, both Windows-only:
+
+    * yada.exe is built for the GUI subsystem, because a tray app must not flash a console
+      window on every launch. The cost is that it starts with no stdout at all: run
+      `yada doctor` from PowerShell and it prints nothing, succeeds, and tells you nothing.
+      AttachConsole(ATTACH_PARENT_PROCESS) borrows the terminal that launched us.
+
+    * The console's default code page is cp1252, which cannot encode the arrows, em-dashes
+      and ellipses in our own help text. Writing one raised UnicodeEncodeError and killed
+      `yada doctor` halfway through its report. The code page is switched to UTF-8 and the
+      streams are reconfigured with errors="replace", so output is correct on a modern
+      terminal and merely imperfect on a legacy one -- never fatal.
     """
     if sys.platform != "win32":
         return
@@ -39,7 +49,14 @@ def _attach_parent_console() -> None:
 
     try:
         import ctypes
+    except ImportError:
+        return
 
+    # Independent of whether we own the console: fix encoding first, since a redirected
+    # stream can be just as cp1252 as an attached one.
+    _force_utf8_streams(ctypes)
+
+    try:
         ATTACH_PARENT_PROCESS = -1
         if not ctypes.windll.kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
             return
@@ -54,6 +71,19 @@ def _attach_parent_console() -> None:
         sys.stdin = open("CONIN$", encoding="utf-8", errors="replace")  # noqa: SIM115
     except Exception:  # noqa: BLE001 - no console is a normal state, never a failure
         return
+
+
+def _force_utf8_streams(ctypes_module) -> None:
+    """Best-effort: UTF-8 console code page, and streams that never raise on encode."""
+    with contextlib.suppress(Exception):  # no console, or a restricted one
+        ctypes_module.windll.kernel32.SetConsoleOutputCP(65001)
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        # A pipe that refuses reconfiguration is not worth failing over.
+        with contextlib.suppress(Exception):
+            reconfigure(encoding="utf-8", errors="replace")
 
 USAGE = """yada — Yet Another Dictating App
 
@@ -78,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     # Any subcommand may print. Bare `yada` starts the tray app and deliberately does not
     # borrow the terminal, so launching it from a shell returns the prompt immediately.
     if args:
-        _attach_parent_console()
+        _prepare_console()
 
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)

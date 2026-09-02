@@ -81,7 +81,15 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd = [str(target.executable), *args]
     if sys.platform == "win32":
-        # execv on Windows detaches oddly from a console parent; spawn and exit instead.
+        # execv on Windows detaches oddly from a console parent, so spawn instead. But the
+        # two cases need opposite behaviour:
+        #
+        #   Launching the GUI -- detach and return, so a shell prompt comes straight back.
+        #   A client subcommand -- wait and propagate the exit code, because the caller is
+        #   reading it. Returning 0 immediately made `yada status` always report success,
+        #   which silently broke every script and check that relied on it.
+        if args and args[0] in CLIENT_COMMANDS:
+            return subprocess.run(cmd, check=False).returncode
         subprocess.Popen(cmd, close_fds=True)
         return 0
     os.execv(str(target.executable), cmd)

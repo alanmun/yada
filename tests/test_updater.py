@@ -410,3 +410,45 @@ def test_client_commands_do_not_count_as_launch_attempts(install_root, monkeypat
     # A real launch, with no subcommand, does count.
     launcher.main([])
     assert core._load_state()["versions"]["0.2.0"]["attempts"] == 1
+
+
+def test_windows_launcher_propagates_client_exit_codes(install_root, monkeypatch):
+    """`yada status` must return the child's exit code, not 0 unconditionally.
+
+    The Windows launcher spawns rather than exec'ing. Returning 0 immediately meant every
+    client subcommand reported success whether or not the app was running, which made
+    `status` useless and silently broke anything scripted against it.
+    """
+    from yada import launcher
+
+    # Patch the platform first: executable_name() feeds both _install_fake and the
+    # launcher's lookup, so a mismatch here sends it down the dev-mode fallback instead.
+    monkeypatch.setattr(sys, "platform", "win32")
+    _install_fake("0.2.0")
+    core.write_current("0.2.0")
+
+    calls: list[tuple[str, list[str]]] = []
+
+    class FakeCompleted:
+        returncode = 3
+
+    def fake_run(cmd, **kwargs):
+        calls.append(("run", list(cmd)))
+        return FakeCompleted()
+
+    def fake_popen(cmd, **kwargs):
+        calls.append(("popen", list(cmd)))
+        return None
+
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+
+    # A client command waits and passes the code through.
+    assert launcher.main(["status"]) == 3
+    assert calls[-1][0] == "run"
+    assert calls[-1][1][-1] == "status"
+
+    # Launching the GUI detaches, so the shell prompt returns immediately.
+    calls.clear()
+    assert launcher.main([]) == 0
+    assert calls[-1][0] == "popen"
