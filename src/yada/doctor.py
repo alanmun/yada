@@ -175,8 +175,14 @@ def _hotkey_checks() -> list[Check]:
         combo = Combo.parse(settings.hotkey.combo)
         combo_note = combo.display
     except InvalidCombo as exc:
-        return [Check("Shortcut", FAIL, f"{settings.hotkey.combo!r} is invalid: {exc}",
-                      "Fix it on the Shortcut tab in Settings.")]
+        return [
+            Check(
+                "Shortcut",
+                FAIL,
+                f"{settings.hotkey.combo!r} is invalid: {exc}",
+                "Fix it on the Shortcut tab in Settings.",
+            )
+        ]
 
     backend = create_backend(settings.hotkey.backend)
     checks = [
@@ -261,6 +267,7 @@ def _install_checks() -> list[Check]:
     versions = installed_versions()
     current = read_current()
     if versions:
+
         def size_mb(path: Path) -> int:
             total = 0
             for item in path.rglob("*"):
@@ -330,14 +337,18 @@ def _antivirus_checks() -> list[Check]:
         "if ($d) { "
         "  $t = Get-MpThreat -ErrorAction SilentlyContinue | "
         "       Where-Object { $_.ThreatID -eq $d.ThreatID } | Select-Object -First 1; "
-        "  \"$($t.ThreatName)|$($d.InitialDetectionTime)\" }"
+        '  "$($t.ThreatName)|$($d.InitialDetectionTime)" }'
     )
     try:
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
             capture_output=True,
             text=True,
-            timeout=25,
+            # Deliberately inside CHECK_TIMEOUT_SECONDS. At 25s against a 20s group
+            # deadline the group was always abandoned first, so this timeout could never
+            # fire and its own error handling was dead code -- while Defender's history,
+            # which is slow to enumerate on a machine with any, burned the whole budget.
+            timeout=CHECK_TIMEOUT_SECONDS * 0.6,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -354,7 +365,7 @@ def _antivirus_checks() -> list[Check]:
             "This is a false positive -- yada is unsigned, and heuristics flag small "
             "unsigned programs that start with Windows. To keep it working, either allow "
             "the item in Windows Security > Protection history, or exclude the folder:\n"
-            "    Add-MpPreference -ExclusionPath \"$env:LOCALAPPDATA\\yada\"\n"
+            '    Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\\yada"\n'
             "(that command needs an administrator PowerShell)",
         )
     ]
@@ -415,8 +426,16 @@ def _run_group(name: str, group: Callable[[], list[Check]]) -> list[Check]:
     return result
 
 
+# Nine groups at CHECK_TIMEOUT_SECONDS each is three minutes, which is not a diagnostic
+# tool, it is a hang. Past this the rest are reported as skipped rather than waited for.
+TOTAL_BUDGET_SECONDS = 60.0
+
+
 def iter_checks() -> Iterator[Check]:
     """Yield checks as they complete, so output appears even if a later one stalls."""
+    import time
+
+    deadline = time.monotonic() + TOTAL_BUDGET_SECONDS
     for name, group in (
         ("Platform", _platform_checks),
         ("Microphone", _audio_checks),
@@ -428,6 +447,14 @@ def iter_checks() -> Iterator[Check]:
         ("Antivirus", _antivirus_checks),
         ("Paths", _path_checks),
     ):
+        if time.monotonic() >= deadline:
+            yield Check(
+                name,
+                WARN,
+                "skipped — doctor ran out of time before reaching this check",
+                "Something earlier stalled. The checks above name what completed.",
+            )
+            continue
         yield from _run_group(name, group)
 
 
@@ -435,28 +462,73 @@ def run_checks() -> list[Check]:
     return list(iter_checks())
 
 
+def report_path() -> Path:
+    """Where the report is always written, whether or not anything can be printed."""
+    from .updater.core import install_root
+
+    return install_root() / "doctor-report.txt"
+
+
+class _Emitter:
+    """Writes every line to a file, and to stdout when there is one.
+
+    Both halves are needed. A PyInstaller windowed build has no stdout unless it manages
+    to attach to a parent console, so `yada doctor` redirected to a file produced an empty
+    file -- the one tool for diagnosing "it will not start" was unusable in precisely the
+    situation it exists for. And writing as it goes means a check that stalls still leaves
+    a report naming the check it stalled on, instead of nothing at all.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._file = None
+        with contextlib.suppress(OSError):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = path.open("w", encoding="utf-8", errors="replace", buffering=1)
+
+    def __call__(self, line: str = "") -> None:
+        if self._file is not None:
+            with contextlib.suppress(OSError, ValueError):
+                self._file.write(line + "\n")
+        # stdout is absent in a windowed build, and print() on it raises rather than
+        # discarding, which would abandon the report half-written.
+        with contextlib.suppress(Exception):
+            print(line, flush=True)
+
+    def close(self) -> None:
+        if self._file is not None:
+            with contextlib.suppress(OSError, ValueError):
+                self._file.close()
+
+
 def main() -> int:
-    # Header first, then a line per check as it finishes. If something stalls, the output
+    # Header first, then a line per check as it finishes. If something stalls, the report
     # already names everything that passed and stops at the culprit.
-    print("yada doctor\n", flush=True)
-    checks: list[Check] = []
-    for check in iter_checks():
-        checks.append(check)
-        print(f"[{MARKS[check.status]}] {check.name}: {check.detail}", flush=True)
-        if check.fix:
-            for line in check.fix.splitlines():
-                print(f"          {line}", flush=True)
-    failures = [c for c in checks if c.status == FAIL]
-    warnings = [c for c in checks if c.status == WARN]
-    print()
-    if failures:
-        print(f"{len(failures)} problem(s) will stop yada working. Fix those first.")
-        # Shipping a green summary next to a red line would be worse than useless.
-        if shutil.which("uv") is None and sys.platform != "win32":
-            print("Note: uv was not found on PATH.")
-        return 1
-    if warnings:
-        print(f"Usable, with {len(warnings)} thing(s) worth knowing about above.")
+    path = report_path()
+    emit = _Emitter(path)
+    try:
+        emit("yada doctor")
+        emit(f"report: {path}")
+        emit()
+        checks: list[Check] = []
+        for check in iter_checks():
+            checks.append(check)
+            emit(f"[{MARKS[check.status]}] {check.name}: {check.detail}")
+            if check.fix:
+                for line in check.fix.splitlines():
+                    emit(f"          {line}")
+        failures = [c for c in checks if c.status == FAIL]
+        warnings = [c for c in checks if c.status == WARN]
+        emit()
+        if failures:
+            emit(f"{len(failures)} problem(s) will stop yada working. Fix those first.")
+            # Shipping a green summary next to a red line would be worse than useless.
+            if shutil.which("uv") is None and sys.platform != "win32":
+                emit("Note: uv was not found on PATH.")
+            return 1
+        if warnings:
+            emit(f"Usable, with {len(warnings)} thing(s) worth knowing about above.")
+            return 0
+        emit("Everything checks out.")
         return 0
-    print("Everything checks out.")
-    return 0
+    finally:
+        emit.close()

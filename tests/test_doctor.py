@@ -127,3 +127,91 @@ def test_prepare_console_is_a_noop_off_windows(monkeypatch):
 
     monkeypatch.setattr(sys, "platform", "linux")
     entry._prepare_console()  # must not raise or touch anything
+
+
+def test_the_report_is_written_even_with_no_stdout(tmp_path, monkeypatch, capsys):
+    """A windowed build has no stdout unless it attaches to a parent console.
+
+    `yada doctor` redirected to a file produced an empty file and ran for over two
+    minutes -- the one tool for diagnosing "it will not start" was useless in exactly the
+    situation it exists for.
+    """
+    import sys as real_sys
+
+    from yada import doctor
+
+    monkeypatch.setenv("YADA_INSTALL_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        doctor, "iter_checks", lambda: iter([doctor.Check("Thing", doctor.OK, "fine")])
+    )
+
+    class Exploding:
+        """print() raises on a windowed build's absent stdout rather than discarding."""
+
+        def write(self, _text):
+            raise ValueError("I/O operation on closed file")
+
+        def flush(self):
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr(real_sys, "stdout", Exploding())
+    try:
+        rc = doctor.main()
+    finally:
+        monkeypatch.undo()
+
+    assert rc == 0
+    report = tmp_path / "doctor-report.txt"
+    assert report.exists(), "the report must survive a stdout that cannot be written to"
+    body = report.read_text(encoding="utf-8")
+    assert "yada doctor" in body
+    assert "Thing" in body
+
+
+def test_the_report_names_where_it_went(tmp_path, monkeypatch):
+    from yada import doctor
+
+    monkeypatch.setenv("YADA_INSTALL_ROOT", str(tmp_path))
+    monkeypatch.setattr(doctor, "iter_checks", lambda: iter([]))
+    doctor.main()
+    body = (tmp_path / "doctor-report.txt").read_text(encoding="utf-8")
+    assert str(doctor.report_path()) in body, "so the user can find it when nothing printed"
+
+
+def test_checks_are_skipped_once_the_budget_is_spent(monkeypatch):
+    """Nine groups at twenty seconds each is three minutes, which is a hang, not a tool."""
+    import time
+
+    from yada import doctor
+
+    monkeypatch.setattr(doctor, "TOTAL_BUDGET_SECONDS", 0.0)
+    ran = []
+
+    def noisy_group(name):
+        def run():
+            ran.append(name)
+            return [doctor.Check(name, doctor.OK, "ran")]
+
+        return run
+
+    monkeypatch.setattr(doctor, "_run_group", lambda name, group: group())
+    checks = list(doctor.iter_checks())
+
+    assert ran == [], "with no budget left, nothing should be run"
+    assert checks, "but every check must still be reported"
+    assert all(c.status == doctor.WARN for c in checks)
+    assert all("ran out of time" in c.detail for c in checks)
+    assert time.monotonic() > 0  # sanity: the clock is what gates this
+
+
+def test_the_antivirus_probe_fits_inside_its_group_deadline():
+    """At 25s against a 20s group deadline its own timeout was dead code."""
+    import inspect
+
+    from yada import doctor
+
+    source = inspect.getsource(doctor._antivirus_checks)
+    assert "CHECK_TIMEOUT_SECONDS" in source, (
+        "the subprocess timeout must be derived from the group deadline, not a constant "
+        "that can drift past it"
+    )
