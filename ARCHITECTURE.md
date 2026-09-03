@@ -179,6 +179,34 @@ follow, both tested:
   `_push_status_to_settings` skips a window that is not visible — which is why the pickers
   were empty on first open and looked like "click Refresh".
 
+### A refusal is a measurement, and it is written down
+
+The catalog's probe store is filled from two directions. `probe()` asks a question; a
+refusal during a *real* request answers the same question better, because it is the exact
+call the user is making. Both land in `entry.probes[model][parameter]`, so a model that
+rejects `delay` is known to reject it at the next launch instead of being relearned by
+failing once per session. Providers are handed what earlier runs learned via
+`seed_unsupported`, and report new refusals through a sink the app installs — a module-level
+hook, because providers are built per request and hold no app state. A failing sink is
+swallowed: persistence is a convenience and must never cost a dictation.
+
+The UI reads the same store, so the speed dial is disabled for a model known to refuse it.
+`UNKNOWN` is deliberately not a refusal — it means "send it and see", which is the whole
+reason support is tri-state.
+
+### The level meter opens the microphone only when asked
+
+Explicitly, on a button, never as a side effect of the settings window being open: a
+dictation app silently opening the microphone because you went to look at a setting is not
+a defensible default. Peak rather than RMS, with a slow-falling hold, because the question
+is "am I clipping" and a clip lasts a couple of milliseconds. Gain is already applied by the
+time frames reach a sink, so the meter shows what the model will hear rather than what the
+microphone produced — which is what makes the gain dial meaningful.
+
+A dictation always wins the device: two streams on one microphone is a reliable way to get
+neither, so the meter is released when a recording starts, when the window closes, and on
+shutdown.
+
 ## Capability support is tri-state, not boolean
 
 `Support` is `SUPPORTED` / `UNKNOWN` / `UNSUPPORTED`, because the middle case is the

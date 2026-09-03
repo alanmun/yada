@@ -18,7 +18,7 @@ import base64
 import contextlib
 import json
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import ClassVar
 
@@ -61,6 +61,32 @@ PROVIDER = "openai"
 # provider changing its mind.
 _UNSUPPORTED_FIELDS: dict[str, set[str]] = {}
 
+# Told about each new refusal, so it can be written somewhere that outlives the process.
+# A plain module-level hook because providers are built per request and hold no app state;
+# the app installs it once at startup. Unset in tests and in the spike scripts, where the
+# in-memory memo is all that is wanted.
+_unsupported_sink: Callable[[str, str, str], None] | None = None
+
+
+def set_unsupported_sink(sink: Callable[[str, str, str], None] | None) -> None:
+    """Install a callback for `(model, field, detail)` whenever a field is refused."""
+    global _unsupported_sink
+    _unsupported_sink = sink
+
+
+def seed_unsupported(known: Mapping[str, set[str]]) -> None:
+    """Preload what previous runs learned, so the first request already knows better."""
+    for model, fields in known.items():
+        _UNSUPPORTED_FIELDS.setdefault(model, set()).update(fields)
+
+
+def _remember_unsupported(model: str, field_name: str, detail: str) -> None:
+    _UNSUPPORTED_FIELDS.setdefault(model, set()).add(field_name)
+    if _unsupported_sink is not None:
+        with contextlib.suppress(Exception):  # persistence must never fail a recording
+            _unsupported_sink(model, field_name, detail)
+
+
 # "The 'delay' parameter is not supported for this model."
 _UNSUPPORTED_RE = re.compile(r"'([A-Za-z_][A-Za-z0-9_]*)'\s+parameter is not supported", re.I)
 
@@ -77,6 +103,7 @@ class _UnsupportedField(ProviderError):
     def __init__(self, field: str, detail: str) -> None:
         super().__init__(detail, provider=PROVIDER, retryable=True)
         self.field = field
+
 
 # Preference ordering for auto-selected models. Discovery still returns everything; this
 # only decides what "" (auto) resolves to and what sorts first in the picker. Names, not
@@ -246,7 +273,7 @@ class OpenAIRealtimeSession(StreamingSession):
                 # Drop the field and try again rather than giving up on live transcription
                 # for a parameter the user cannot see and did not ask for. Remembered, so
                 # the rest of this run pays nothing.
-                _UNSUPPORTED_FIELDS.setdefault(self._opts.model, set()).add(exc.field)
+                _remember_unsupported(self._opts.model, exc.field, str(exc))
                 if attempt == _MAX_FIELD_RETRIES - 1:
                     raise
                 continue

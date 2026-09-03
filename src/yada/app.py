@@ -28,6 +28,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
 from . import config, ipc, secrets
+from .audio import AudioCapture, AudioDeviceError, peak_level
 from .audio import warm_up as warm_up_audio
 from .config import Settings
 from .hotkey import Combo, InvalidCombo, create_backend
@@ -107,6 +108,9 @@ class EventBridge(QObject):
     # thread, and touching a QLabel from there is undefined -- in practice the update was
     # simply discarded, so pressing Test appeared to do nothing at all.
     provider_test_result = Signal(str, str)
+    # Input level for the settings meter. Emitted from the PortAudio callback
+    # thread, which may not touch a widget, so it has to be a signal.
+    audio_level = Signal(float)
     # Clipboard write plus the paste keystroke. Also must be a signal, and this one was
     # worse than a discarded update: Qt's Windows clipboard is OLE-based and requires the
     # GUI thread, so calling it from the asyncio thread blocked forever. The text reached
@@ -142,6 +146,8 @@ class YadaApp(QObject):
         self.paste_backend = create_paste_backend()
         self.settings_window: SettingsWindow | None = None
         self._hotkey = None
+        # An AudioCapture opened only while the settings meter is running.
+        self._level_capture: AudioCapture | None = None
         self._ipc: ipc.CommandServer | None = None
         self._updates: UpdateService | None = None
 
@@ -187,13 +193,12 @@ class YadaApp(QObject):
             self.app.quit()
             return
         self.tray.show()
+        self._sync_provider_capabilities()
         self._apply_notification_setting()
         self._start_hotkey()
         # On its own thread rather than the loop: PortAudio initialisation is blocking C
         # code, and the point is to keep it away from anything that is being waited on.
-        threading.Thread(
-            target=warm_up_audio, name="yada-audio-warmup", daemon=True
-        ).start()
+        threading.Thread(target=warm_up_audio, name="yada-audio-warmup", daemon=True).start()
 
         # Kick discovery and the update check after the UI is up, so neither delays the
         # tray icon appearing.
@@ -270,10 +275,7 @@ class YadaApp(QObject):
 
         appdata = os.environ.get("APPDATA")
         if appdata:
-            lnk = (
-                Path(appdata)
-                / "Microsoft/Windows/Start Menu/Programs/yada.lnk"
-            )
+            lnk = Path(appdata) / "Microsoft/Windows/Start Menu/Programs/yada.lnk"
             script = (
                 f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');"
                 f"$s.TargetPath='{executable}';$s.WorkingDirectory='{executable.parent}';"
@@ -289,9 +291,10 @@ class YadaApp(QObject):
                 )
 
         run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        with contextlib.suppress(OSError), winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE
-        ) as key:
+        with (
+            contextlib.suppress(OSError),
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE) as key,
+        ):
             if self.settings.start_on_login:
                 winreg.SetValueEx(key, "yada", 0, winreg.REG_SZ, f'"{executable}"')
             else:
@@ -299,9 +302,7 @@ class YadaApp(QObject):
                     winreg.DeleteValue(key, "yada")
 
     def _sync_linux_integration(self, executable: Path) -> None:
-        data_home = Path(
-            os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
-        )
+        data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
         with contextlib.suppress(OSError):
             bin_dir = Path.home() / ".local" / "bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
@@ -326,9 +327,9 @@ class YadaApp(QObject):
             apps.mkdir(parents=True, exist_ok=True)
             (apps / "yada.desktop").write_text(desktop, encoding="utf-8")
 
-        autostart = Path(
-            os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-        ) / "autostart"
+        autostart = (
+            Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "autostart"
+        )
         with contextlib.suppress(OSError):
             entry = autostart / "yada.desktop"
             if self.settings.start_on_login:
@@ -350,6 +351,7 @@ class YadaApp(QObject):
         self.tray.quit_requested.connect(self.quit)
 
         self.bridge.state.connect(self.tray.set_state, Qt.ConnectionType.QueuedConnection)
+        self.bridge.state.connect(self._on_session_state, Qt.ConnectionType.QueuedConnection)
         self.bridge.finished.connect(self._on_finished, Qt.ConnectionType.QueuedConnection)
         self.bridge.error.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self.bridge.warning.connect(self._on_warning, Qt.ConnectionType.QueuedConnection)
@@ -363,9 +365,8 @@ class YadaApp(QObject):
             self.show_settings, Qt.ConnectionType.QueuedConnection
         )
         self.bridge.quit_requested.connect(self.quit, Qt.ConnectionType.QueuedConnection)
-        self.bridge.deliver_requested.connect(
-            self._deliver, Qt.ConnectionType.QueuedConnection
-        )
+        self.bridge.deliver_requested.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
+        self.bridge.audio_level.connect(self._on_audio_level, Qt.ConnectionType.QueuedConnection)
         self.bridge.provider_test_result.connect(
             self._on_provider_test_result, Qt.ConnectionType.QueuedConnection
         )
@@ -395,6 +396,69 @@ class YadaApp(QObject):
             return False
         self._ipc = server
         return True
+
+    def _on_session_state(self, state: SessionState) -> None:
+        """A dictation always wins the microphone; the meter steps aside."""
+        if state is not SessionState.IDLE and self._level_capture is not None:
+            self._stop_level_capture()
+            if self.settings_window is not None:
+                self.settings_window.stop_mic_test("Paused while a dictation is running.")
+
+    def _set_mic_test(self, active: bool) -> None:
+        """Open or release the microphone for the settings level meter.
+
+        Separate from the recording capture on purpose: two streams on one device is a
+        reliable way to get neither, so a dictation always wins and the meter steps aside.
+        """
+        self._stop_level_capture()
+        if not active:
+            return
+        if self.session.state is not SessionState.IDLE:
+            if self.settings_window is not None:
+                self.settings_window.stop_mic_test("Not while a dictation is running.")
+            return
+        capture = AudioCapture(
+            self._on_level_frames,
+            device=self.settings.audio.device,
+            gain=self.settings.audio.input_gain,
+        )
+        try:
+            capture.start()
+        except AudioDeviceError as exc:
+            if self.settings_window is not None:
+                self.settings_window.stop_mic_test(str(exc))
+            return
+        self._level_capture = capture
+
+    def _stop_level_capture(self) -> None:
+        capture, self._level_capture = self._level_capture, None
+        if capture is not None:
+            with contextlib.suppress(Exception):
+                capture.stop()
+
+    def _on_level_frames(self, pcm16: bytes) -> None:
+        # PortAudio's callback thread. Emitting is the only safe thing to do from here.
+        self.bridge.audio_level.emit(peak_level(pcm16))
+
+    def _on_audio_level(self, level: float) -> None:
+        if self.settings_window is not None:
+            self.settings_window.set_audio_level(level)
+
+    def _sync_provider_capabilities(self) -> None:
+        """Hand providers what earlier runs learned, and persist what this one learns.
+
+        A refused parameter used to be relearned by failing once per launch. The catalog's
+        probe store already existed for exactly this answer; a refusal during a real request
+        is simply a better measurement than a probe, because it is the call being made.
+        """
+        from .providers import openai_provider
+
+        openai_provider.seed_unsupported(self.catalog.unsupported_parameters("openai"))
+        openai_provider.set_unsupported_sink(
+            lambda model, field, detail: self.catalog.record_support(
+                "openai", model, field, Support.UNSUPPORTED, detail
+            )
+        )
 
     def _apply_notification_setting(self) -> None:
         self.tray.notifications_enabled = self.settings.output.show_notifications
@@ -535,6 +599,7 @@ class YadaApp(QObject):
             window.test_provider_requested.connect(self._test_provider)
             window.check_updates_requested.connect(self.check_updates)
             window.preview_sound_requested.connect(self._preview_sound)
+            window.mic_test_requested.connect(self._set_mic_test)
             window.restart_requested.connect(self.restart)
             self.settings_window = window
         else:
@@ -624,6 +689,9 @@ class YadaApp(QObject):
         """
         with contextlib.suppress(Exception):
             asyncio.run_coroutine_threadsafe(self.session.shutdown(), self.loop)
+        # The meter holds a second stream on the same device; a lingering one is exactly
+        # the "still holding the microphone" state described above.
+        self._stop_level_capture()
         if self._hotkey is not None:
             with contextlib.suppress(Exception):
                 self._hotkey.stop()
@@ -859,6 +927,9 @@ class YadaApp(QObject):
             stt_id, self.settings.transcription.model, Modality.TRANSCRIPTION
         )
         window.stt_model.set_drift_warning(drift)
+        window.set_transcription_capabilities(
+            delay=self._delay_support(stt_id, stt_entry, self.settings.transcription.model)
+        )
 
         tf_id = self.settings.transform.provider
         tf_entry = self.catalog.entry(tf_id)
@@ -891,6 +962,19 @@ class YadaApp(QObject):
             window.set_update_ready(self._updates.status.ready_version)
         window.refresh_key_status()
 
+    def _delay_support(self, provider_id: str, entry, model: str) -> Support:
+        """Whether this model takes the speed dial: what we measured beats what we assumed."""
+        built = self._build_transcriber()
+        fallback = Support.UNKNOWN
+        if built is not None:
+            provider, _ = built
+            fallback = (
+                Support.SUPPORTED if provider.capabilities().delay_tuning else Support.UNSUPPORTED
+            )
+        if not model:
+            return fallback
+        return entry.support_for(model, "delay", fallback)
+
     def _recommended(self, provider_id: str, modality: Modality, models) -> str:
         """The provider's curated pick, if discovery actually returned it."""
         spec = SPECS.get(provider_id)
@@ -909,8 +993,7 @@ class YadaApp(QObject):
         label = spec.label if spec else provider_id
         if not self._key_for(provider_id):
             return (
-                f"Add your {label} key on the Providers tab — the model list then loads "
-                "by itself."
+                f"Add your {label} key on the Providers tab — the model list then loads by itself."
             )
         if not entry.models and not entry.last_error:
             return f"Loading the {label} model list…"
@@ -932,10 +1015,14 @@ class YadaApp(QObject):
 
         self._configure_chimes()
         self._apply_notification_setting()
-        if (
-            new_settings.theme != old.theme
-            or new_settings.text_scale != old.text_scale
+        if self._level_capture is not None and (
+            new_settings.audio.device != old.audio.device
+            or new_settings.audio.input_gain != old.audio.input_gain
         ):
+            # Reopen so the meter shows the setting being adjusted, which is the entire
+            # reason someone has the meter open while touching the gain.
+            self._set_mic_test(True)
+        if new_settings.theme != old.theme or new_settings.text_scale != old.text_scale:
             apply_theme(self.app, new_settings.theme, new_settings.text_scale)
         if new_settings.start_on_login != old.start_on_login:
             self._sync_desktop_integration()

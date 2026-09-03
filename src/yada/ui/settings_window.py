@@ -50,6 +50,7 @@ from .steps_editor import StepsEditor
 from .theme import TEXT_SCALE_LABELS, TEXT_SCALES, THEME_LABELS, THEMES
 from .widgets import (
     CheckableComboBox,
+    LevelMeter,
     ModelPicker,
     PromptEditor,
     StringListEditor,
@@ -91,6 +92,22 @@ def _running_version() -> str:
 
 
 def _scrollable(inner: QWidget) -> QScrollArea:
+    """Wrap a tab page, giving its sections room to breathe.
+
+    Applied here rather than in each tab so the spacing cannot drift between them: every
+    page is built the same way, and every one of them had its group boxes butted directly
+    against the next with no gap at all.
+
+    Derived from the font so it holds at every text size -- a fixed pixel gap that looks
+    right at the default reads as cramped at Largest.
+    """
+    layout = inner.layout()
+    if layout is not None:
+        gap = max(10, round(inner.fontMetrics().height() * 0.7))
+        layout.setSpacing(gap)
+        margin = max(8, round(gap * 0.8))
+        layout.setContentsMargins(margin, margin, margin, margin)
+
     area = QScrollArea()
     area.setWidgetResizable(True)
     area.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -122,6 +139,11 @@ class SettingsWindow(QWidget):
     preview_sound_requested = Signal(str)
     sound_library_changed = Signal()
     restart_requested = Signal()
+    # True to open the microphone for the level meter, False to release it. An
+    # explicit request rather than something tied to the tab being visible: a
+    # dictation app must not open the microphone as a side effect of opening its
+    # settings.
+    mic_test_requested = Signal(bool)
 
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -244,9 +266,7 @@ class SettingsWindow(QWidget):
         self._provider_pages = QStackedWidget()
         for spec in SPECS.values():
             self._provider_pages.addWidget(self._build_provider_page(spec))
-        self.provider_chooser.currentIndexChanged.connect(
-            self._provider_pages.setCurrentIndex
-        )
+        self.provider_chooser.currentIndexChanged.connect(self._provider_pages.setCurrentIndex)
         layout.addWidget(self._provider_pages)
 
         planned = QGroupBox("Not yet available")
@@ -460,6 +480,9 @@ class SettingsWindow(QWidget):
                 ),
             )
         )
+        self.stt_delay_note = hint("")
+        self.stt_delay_note.hide()
+        layout.addWidget(self.stt_delay_note)
         layout.addStretch(1)
         return page
 
@@ -478,8 +501,10 @@ class SettingsWindow(QWidget):
         self.tf_enabled.toggled.connect(self._on_transform_toggled)
         layout.addWidget(self.tf_enabled)
         layout.addWidget(
-            hint("A second chime sounds when the cleanup finishes, so the two stages are "
-                 "distinguishable without looking.")
+            hint(
+                "A second chime sounds when the cleanup finishes, so the two stages are "
+                "distinguishable without looking."
+            )
         )
 
         self.tf_body = QWidget()
@@ -553,6 +578,39 @@ class SettingsWindow(QWidget):
             if index >= 0:
                 self.tf_reasoning.setCurrentIndex(index)
         self._on_reasoning_toggled(self.tf_reasoning_box.isChecked())
+
+    def _on_mic_test_toggled(self, active: bool) -> None:
+        self.mic_test.setText("Stop test" if active else "Test microphone")
+        self.level_meter.set_active(active)
+        self.mic_test_requested.emit(active)
+
+    def set_audio_level(self, level: float) -> None:
+        self.level_meter.set_level(level)
+
+    def stop_mic_test(self, reason: str = "") -> None:
+        """Called when the app takes the microphone back, or cannot give it up."""
+        if self.mic_test.isChecked():
+            self.mic_test.setChecked(False)  # toggled() releases the device
+        if reason:
+            self.mic_test_note.setText(reason)
+
+    def set_transcription_capabilities(self, *, delay: Support) -> None:
+        """Disable the speed dial for models that refuse it.
+
+        Three of the five OpenAI transcription models reject `delay` outright -- they do not
+        ignore it, they refuse the whole session -- so leaving the dial live invited setting
+        something that could only fail. yada drops the field and retries either way; this is
+        so the UI stops offering a choice that does not exist.
+        """
+        usable = delay is not Support.UNSUPPORTED
+        self.stt_delay.setEnabled(usable)
+        if usable:
+            self.stt_delay_note.setText("")
+        else:
+            self.stt_delay_note.setText(
+                "This model does not accept a speed setting, so yada leaves it out."
+            )
+        self.stt_delay_note.setVisible(not usable)
 
     # ==================================================================================
     # Vocabulary
@@ -770,6 +828,26 @@ class SettingsWindow(QWidget):
                 ),
             )
         )
+
+        self.mic_test = QPushButton("Test microphone")
+        self.mic_test.setCheckable(True)
+        self.mic_test.toggled.connect(self._on_mic_test_toggled)
+        self.level_meter = LevelMeter()
+        # Match the button beside it, or the bar reads as a divider rather than a meter.
+        self.level_meter.setMinimumHeight(self.mic_test.sizeHint().height())
+        meter_row = QHBoxLayout()
+        meter_row.addWidget(self.level_meter, 1)
+        meter_row.addWidget(self.mic_test)
+        meter_holder = QWidget()
+        meter_holder.setLayout(meter_row)
+        layout.addWidget(meter_holder)
+        self.mic_test_note = hint(
+            "Opens the microphone and shows what yada would hear, gain included. The bar "
+            "turns amber when the input is hot and red when it is clipping — clipping costs "
+            "accuracy, so back the gain off rather than pushing it up. Stops when this "
+            "window closes or a dictation starts."
+        )
+        layout.addWidget(self.mic_test_note)
 
         paste_box = QGroupBox("Pasting")
         paste_layout = QVBoxLayout(paste_box)
@@ -1118,6 +1196,8 @@ class SettingsWindow(QWidget):
         # debounce simply because the window was closed promptly.
         self.flush_pending_save()
         self.flush_pending_keys()
+        # Never leave the microphone open behind a closed window.
+        self.stop_mic_test()
         event.ignore()
         self.hide()
 

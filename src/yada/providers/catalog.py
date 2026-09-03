@@ -17,6 +17,7 @@ module rather than a helper. Three rules:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 from dataclasses import dataclass, field
@@ -119,9 +120,7 @@ class CatalogEntry:
 
     def for_modality(self, modality: Modality) -> list[ModelInfo]:
         """Newest first, so the most recent release is at the top of every picker."""
-        return sorted(
-            (m for m in self.models if m.modality == modality), key=lambda m: m.sort_key
-        )
+        return sorted((m for m in self.models if m.modality == modality), key=lambda m: m.sort_key)
 
     def support_for(self, model: str, parameter: str, fallback: Support) -> Support:
         """Probe result wins over the provider's own baseline, since it is measured."""
@@ -276,6 +275,45 @@ class ModelCatalog:
         async with self._lock:
             self.save()
         return entry
+
+    def record_support(
+        self, provider_id: str, model: str, parameter: str, support: Support, detail: str = ""
+    ) -> None:
+        """Remember what a live request told us about a parameter.
+
+        The same store `probe()` fills, written from the other direction: a refusal during
+        a real request is a measurement, and a better one than a probe -- it is the exact
+        call the user is making. Without this the answer was relearned by failing once per
+        launch, every launch.
+        """
+        entry = self.entry(provider_id)
+        per_model = entry.probes.setdefault(model, {})
+        existing = per_model.get(parameter)
+        if existing is not None and existing.as_support is support:
+            return  # nothing new to write, so nothing to save
+        per_model[parameter] = ProbeResult(
+            parameter=parameter,
+            support=str(support),
+            checked_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            detail=detail[:300],
+        )
+        with contextlib.suppress(OSError):
+            self.save()
+
+    def unsupported_parameters(self, provider_id: str) -> dict[str, set[str]]:
+        """Everything known to be refused, as {model: {parameter, ...}}.
+
+        Handed to a provider at startup so the first request of a session already knows
+        what not to send.
+        """
+        out: dict[str, set[str]] = {}
+        for model, params in self.entry(provider_id).probes.items():
+            refused = {
+                name for name, result in params.items() if result.as_support is Support.UNSUPPORTED
+            }
+            if refused:
+                out[model] = refused
+        return out
 
     async def probe(
         self,

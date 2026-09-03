@@ -15,11 +15,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import ClassVar
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFontMetrics,
+    QPainter,
     QPalette,
+    QPen,
     QStandardItem,
     QStandardItemModel,
 )
@@ -258,6 +260,85 @@ class ModelPicker(QWidget):
             text = None
         self.drift.setText(text or "")
         self.drift.setVisible(bool(text))
+
+
+class LevelMeter(QWidget):
+    """Live input level, so the gain dial stops being a blind one.
+
+    Peak with a slow-falling hold rather than a bar that tracks the signal exactly: a clip
+    lasts a couple of milliseconds and would otherwise be gone before it could be seen, and
+    clipping is the thing that actually ruins a transcript.
+    """
+
+    TICK_MS = 50
+    LEVEL_DECAY = 0.25
+    PEAK_DECAY = 0.02
+    # Above this the input is close enough to full scale to be worth warning about.
+    HOT = 0.80
+    CLIPPING = 0.97
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._level = 0.0
+        self._peak = 0.0
+        self._active = False
+        self.setMinimumHeight(max(12, round(self.fontMetrics().height() * 0.75)))
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.TICK_MS)
+        self._timer.timeout.connect(self._decay)
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        if active:
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self._level = self._peak = 0.0
+        self.update()
+
+    def set_level(self, level: float) -> None:
+        level = max(0.0, min(1.0, level))
+        self._level = max(self._level, level)
+        self._peak = max(self._peak, level)
+        self.update()
+
+    def _decay(self) -> None:
+        self._level = max(0.0, self._level - self.LEVEL_DECAY)
+        self._peak = max(self._level, self._peak - self.PEAK_DECAY)
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        palette = self.palette()
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        radius = rect.height() / 2
+
+        painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 1))
+        painter.setBrush(palette.color(QPalette.ColorRole.Base))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        if not self._active or self._level <= 0.0:
+            return
+
+        filled = QRectF(rect)
+        filled.setWidth(rect.width() * self._level)
+        if self._level >= self.CLIPPING:
+            colour = QColor("#e05252")
+        elif self._level >= self.HOT:
+            colour = QColor("#e0a132")
+        else:
+            colour = palette.color(QPalette.ColorRole.Highlight)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+        painter.drawRoundedRect(filled, radius, radius)
+
+        # The held peak, drawn as a thin line so a transient clip stays readable.
+        if self._peak > 0.01:
+            x = rect.left() + rect.width() * self._peak
+            painter.setPen(QPen(palette.color(QPalette.ColorRole.BrightText), 2))
+            painter.drawLine(int(x), rect.top() + 2, int(x), rect.bottom() - 1)
 
 
 class SupportCheckBox(QCheckBox):

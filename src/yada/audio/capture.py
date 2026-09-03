@@ -70,6 +70,26 @@ def list_input_devices() -> list[DeviceInfo]:
     return out
 
 
+def peak_level(pcm16: bytes) -> float:
+    """Loudest sample in a block, as 0.0-1.0.
+
+    Peak rather than RMS on purpose: the question the meter answers is "am I clipping",
+    and RMS hides exactly the short transients that ruin a transcript. Gain has already
+    been applied by the time frames reach a sink, so this shows what the model will hear
+    rather than what the microphone produced.
+    """
+    if not pcm16:
+        return 0.0
+    import numpy as np
+
+    samples = np.frombuffer(pcm16, dtype="<i2")
+    if samples.size == 0:
+        return 0.0
+    # abs(-32768) overflows int16, so widen before taking the magnitude.
+    loudest = int(np.abs(samples.astype(np.int32)).max())
+    return min(1.0, loudest / 32767.0)
+
+
 def warm_up() -> None:
     """Initialise PortAudio before the first recording, off the start path.
 
@@ -148,8 +168,8 @@ class AudioCapture:
 
         self._in_rate = int(info["default_samplerate"])
         # Mono where possible; downmix in the callback when the device insists on stereo.
-        self._channels = 1 if int(info["max_input_channels"]) >= 1 else int(
-            info["max_input_channels"]
+        self._channels = (
+            1 if int(info["max_input_channels"]) >= 1 else int(info["max_input_channels"])
         )
         self._resampler = self._make_resampler(self._in_rate)
 
@@ -197,9 +217,7 @@ class AudioCapture:
             return None  # no conversion needed; skip the work entirely
         import soxr
 
-        return soxr.ResampleStream(
-            in_rate, TARGET_SAMPLE_RATE, 1, dtype="float32", quality="VHQ"
-        )
+        return soxr.ResampleStream(in_rate, TARGET_SAMPLE_RATE, 1, dtype="float32", quality="VHQ")
 
     def _flush_resampler(self) -> bytes:
         if self._resampler is None:
@@ -217,8 +235,10 @@ class AudioCapture:
             # Overflows mean the callback is not keeping up. Recorded, not raised: dropping
             # a block is better than tearing down the stream mid-sentence.
             self.last_error = str(status)
-        mono = indata[:, 0] if indata.ndim > 1 and indata.shape[1] == 1 else (
-            indata.mean(axis=1) if indata.ndim > 1 else indata
+        mono = (
+            indata[:, 0]
+            if indata.ndim > 1 and indata.shape[1] == 1
+            else (indata.mean(axis=1) if indata.ndim > 1 else indata)
         )
         samples = np.asarray(mono, dtype=np.float32)
         if self._gain != 1.0:
