@@ -336,6 +336,49 @@ def _safe_members(names: list[str]) -> None:
             raise UpdateError(f"archive contains an unsafe path: {name}")
 
 
+def _describe(target: Path) -> str:
+    """What is actually in a directory, for an error message that can be acted on.
+
+    "contains no yada.exe" said nothing about why: whether nothing extracted, whether the
+    wrapper folder was still there, or whether one specific file had been taken away again.
+    """
+    try:
+        entries = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
+    except OSError as exc:
+        return f"unreadable ({exc})"
+    if not entries:
+        return "nothing at all"
+    shown = ", ".join(entries[:8])
+    return shown if len(entries) <= 8 else f"{shown}, and {len(entries) - 8} more"
+
+
+def _verify_extracted(target: Path, names: list[str]) -> None:
+    """Every file the archive promised has to be on disk.
+
+    The archive's checksum was already verified against a signed SHA256SUMS, so the bytes
+    were right. A file that is missing now was written and then removed -- on Windows that
+    is antivirus reacting to a freshly extracted, unsigned executable, which is the one
+    cause a user can actually do something about.
+    """
+    missing: list[str] = []
+    for name in names:
+        if name.endswith("/"):
+            continue
+        if not (target / name).exists():
+            missing.append(name)
+            if len(missing) >= 4:
+                break
+    if not missing:
+        return
+    listed = ", ".join(missing)
+    raise UpdateError(
+        f"{len(missing)} file(s) went missing while extracting the release ({listed}). "
+        "The download itself was verified, so something removed them afterwards -- "
+        "antivirus software is the usual cause. Check its protection history, and see "
+        "`yada doctor` for what it has quarantined."
+    )
+
+
 def extract_release(archive: Path, version: str) -> Path:
     """Unpack into versions/<version>/, leaving no trace of whatever was there before.
 
@@ -357,18 +400,29 @@ def extract_release(archive: Path, version: str) -> Path:
     try:
         if archive.suffix == ".zip":
             with zipfile.ZipFile(archive) as zf:
-                _safe_members(zf.namelist())
+                names = zf.namelist()
+                _safe_members(names)
                 zf.extractall(staging_target)
         else:
             with tarfile.open(archive) as tf:
-                _safe_members(tf.getnames())
+                names = tf.getnames()
+                _safe_members(names)
                 tf.extractall(staging_target, filter="data")
+
+        # Checked against the archive's own listing before anything is moved. The archive
+        # is already known to be byte-correct at this point -- its checksum was verified
+        # against a signed SHA256SUMS -- so a file missing here was removed *after* being
+        # written, and naming it is the difference between a cause and a shrug.
+        _verify_extracted(staging_target, names)
 
         _flatten_single_dir(staging_target)
 
         exe = staging_target / ("yada.exe" if sys.platform == "win32" else "yada")
         if not exe.exists():
-            raise UpdateError(f"extracted release {version} contains no {exe.name}")
+            raise UpdateError(
+                f"extracted release {version} contains no {exe.name}. "
+                f"The extracted folder holds: {_describe(staging_target)}"
+            )
         if sys.platform != "win32":
             exe.chmod(0o755)
 

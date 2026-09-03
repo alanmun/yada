@@ -738,3 +738,60 @@ async def test_a_second_check_while_one_is_running_is_ignored(install_root, monk
 
     await asyncio.gather(s.check_now(), s.check_now(), s.check_now())
     assert started == 1, f"expected one check, {started} ran"
+
+
+def test_a_file_removed_after_extraction_is_named(install_root, tmp_path, monkeypatch):
+    """ "contains no yada.exe" said nothing about why, and we saw it twice.
+
+    The archive's checksum is verified against a signed SHA256SUMS before extraction, so a
+    file missing afterwards was written and then taken away -- on Windows, antivirus
+    reacting to a freshly extracted unsigned executable. Naming the file is the difference
+    between a cause and a shrug.
+    """
+    archive = _pack(tmp_path, "yada-9.9.9.tar.gz", as_zip=False)
+
+    real_extractall = github.tarfile.TarFile.extractall
+
+    def extract_then_remove(self, path, *args, **kwargs):
+        real_extractall(self, path, *args, **kwargs)
+        # Whatever the payload's executable is called on this platform.
+        for victim in Path(path).rglob(core.executable_name()):
+            victim.unlink()
+
+    monkeypatch.setattr(github.tarfile.TarFile, "extractall", extract_then_remove)
+
+    with pytest.raises(github.UpdateError) as caught:
+        github.extract_release(archive, "9.9.9")
+
+    message = str(caught.value)
+    assert core.executable_name() in message, "the missing file must be named"
+    assert "antivirus" in message.lower(), "and the usual cause suggested"
+    assert "went missing" in message
+
+
+def test_a_missing_executable_reports_what_was_there_instead(install_root, tmp_path, monkeypatch):
+    """When the tree is intact but the executable is not, say what *is* present."""
+    archive = _pack(tmp_path, "yada-9.9.9.tar.gz", as_zip=False)
+
+    # Pass the completeness check, then lose the executable during the flatten.
+    monkeypatch.setattr(github, "_verify_extracted", lambda *_a, **_k: None)
+    real_flatten = github._flatten_single_dir
+
+    def flatten_then_remove(target):
+        real_flatten(target)
+        exe = target / core.executable_name()
+        if exe.exists():
+            exe.unlink()
+
+    monkeypatch.setattr(github, "_flatten_single_dir", flatten_then_remove)
+
+    with pytest.raises(github.UpdateError, match="contains no") as caught:
+        github.extract_release(archive, "9.9.9")
+
+    message = str(caught.value)
+    assert "extracted folder holds" in message
+    assert "_internal" in message, "a listing is what makes this diagnosable"
+
+
+def test_describe_handles_an_empty_directory(tmp_path):
+    assert github._describe(tmp_path) == "nothing at all"

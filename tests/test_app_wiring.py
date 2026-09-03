@@ -36,7 +36,14 @@ def yada(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr("yada.providers.catalog.cache_dir", lambda: tmp_path)
     app = YadaApp(qapp)
     yield app
+    # Torn down explicitly. Leaving Qt objects to be collected at interpreter exit -- after
+    # the QApplication is gone -- crashes in shiboken rather than failing a test, which is
+    # a miserable thing to debug and worse to hit intermittently in CI.
+    app.overlay.dismiss()
+    app.overlay.deleteLater()
+    app.tray.hide()
     app.async_thread.stop()
+    qapp.processEvents()
 
 
 def test_a_live_partial_reaches_the_overlay(yada, qapp):
