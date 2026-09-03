@@ -52,7 +52,7 @@ from .providers.base import (
 )
 from .providers.catalog import ModelCatalog
 from .providers.registry import SPECS, build_transcriber, build_transformer
-from .ui import wheelguard
+from .ui import enterkey, wheelguard
 from .ui.overlay import LiveOverlay
 from .ui.settings_window import SettingsWindow
 from .ui.theme import apply_theme
@@ -458,6 +458,21 @@ class YadaApp(QObject):
         if self.settings_window is not None:
             self.settings_window.set_audio_level(level)
 
+    def _reset_settings(self) -> None:
+        """Every setting back to its starting value. Keys are deliberately untouched.
+
+        Routed through the ordinary save handler rather than writing the file directly, so
+        the theme, the shortcut, the chimes and the desktop integration are all reapplied
+        by the same code that handles any other change -- a reset that left the running app
+        on the old shortcut would be worse than not offering one.
+        """
+        fresh = Settings()
+        if self.settings_window is not None:
+            # Load first: the handler pushes state back into the window, and the window's
+            # own widgets are what the next autosave will read.
+            self.settings_window.load(fresh)
+        self._on_settings_saved(fresh)
+
     def _sync_provider_capabilities(self) -> None:
         """Hand providers what earlier runs learned, and persist what this one learns.
 
@@ -615,6 +630,7 @@ class YadaApp(QObject):
             window.check_updates_requested.connect(self.check_updates)
             window.preview_sound_requested.connect(self._preview_sound)
             window.mic_test_requested.connect(self._set_mic_test)
+            window.reset_requested.connect(self._reset_settings)
             window.restart_requested.connect(self.restart)
             self.settings_window = window
         else:
@@ -1149,6 +1165,7 @@ def main(
     # Kept on the app object: Qt does not own event filters, and an unreferenced one is
     # collected and stops working.
     app._yada_wheel_guard = wheelguard.install(app)
+    app._yada_enter_guard = enterkey.install(app)
 
     yada = YadaApp(app)
     yada.start()

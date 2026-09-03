@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -154,6 +155,10 @@ class SettingsWindow(QWidget):
     # dictation app must not open the microphone as a side effect of opening its
     # settings.
     mic_test_requested = Signal(bool)
+    # Every setting back to its starting value. Not the API keys: those live in
+    # the OS keyring, they are laborious to replace, and nobody asking to tidy up
+    # their preferences means "and log me out of my provider".
+    reset_requested = Signal()
 
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -912,9 +917,9 @@ class SettingsWindow(QWidget):
         notice_layout.addWidget(self.show_notifications)
         notice_layout.addWidget(
             hint(
-                "Off by default on Windows, where these arrive as toasts in the corner of "
-                "the screen. Warnings and errors still appear on the tray icon's tooltip "
-                "and in this window either way."
+                "On Windows these arrive as toasts in the corner of the screen. Warnings "
+                "and errors appear on the tray icon's tooltip and in this window either "
+                "way."
             )
         )
         layout.addWidget(notice_box)
@@ -948,8 +953,51 @@ class SettingsWindow(QWidget):
         self.sound_library.library_changed.connect(self._on_library_changed)
         chime_layout.addWidget(labelled("Your own sounds", self.sound_library))
         layout.addWidget(chime_box)
+
+        # Last thing on the last tab: destructive, so it should take some scrolling to
+        # reach rather than sitting next to something people click often.
+        reset_box = QGroupBox("Start over")
+        reset_layout = QVBoxLayout(reset_box)
+        self.reset_button = QPushButton("Reset all settings to defaults…")
+        self.reset_button.clicked.connect(self._confirm_reset)
+        # Natural width, left-aligned. A destructive action stretched across the pane is
+        # both easier to hit by accident and more inviting than it deserves to be.
+        reset_row = QHBoxLayout()
+        reset_row.addWidget(self.reset_button)
+        reset_row.addStretch(1)
+        reset_holder = QWidget()
+        reset_holder.setLayout(reset_row)
+        reset_layout.addWidget(reset_holder)
+        reset_layout.addWidget(
+            hint(
+                "Puts every setting on every tab back to how it started. Your API keys are "
+                "kept, and so are any sounds you added."
+            )
+        )
+        layout.addWidget(reset_box)
+
         layout.addStretch(1)
         return page
+
+    def _confirm_reset(self) -> None:
+        """Ask first. This throws away work and cannot be undone."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Reset all settings?")
+        box.setText("Reset every setting to its default?")
+        box.setInformativeText(
+            "Your shortcut, model choices, vocabulary, transform steps, chimes and audio "
+            "settings all go back to how they started. This cannot be undone.\n\n"
+            "Your API keys are kept, and so are any sounds you added."
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Reset)
+        # Cancel is the safe answer, so it is the one Enter and Escape both choose.
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() == QMessageBox.StandardButton.Reset:
+            # A debounced save still holding the old widget state would write it straight
+            # back over the reset.
+            self.discard_pending_save()
+            self.reset_requested.emit()
 
     def _on_library_changed(self) -> None:
         """Keep both pickers in step with the library after an import or removal."""
@@ -1284,6 +1332,10 @@ class SettingsWindow(QWidget):
         if self._save_timer.isActive():
             self._save_timer.stop()
             self._commit()
+
+    def discard_pending_save(self) -> None:
+        """Throw away a queued save, for when its widget state is about to be replaced."""
+        self._save_timer.stop()
 
     def set_update_ready(self, version: str | None) -> None:
         self.restart_button.setVisible(bool(version))

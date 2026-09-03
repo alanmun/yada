@@ -25,11 +25,12 @@ THEMES = ("blue", "system")
 # "evenly throughout" needs.
 TEXT_SCALES = (1.0, 1.3, 1.6, 1.8, 2.0)
 
-# Named for how they actually read, not for how they relate to the platform default.
-# Calling 9pt "normal" was indefensible: it is tiny in a window full of prose, which is
-# why yada does not ship it as the default.
+# Named for how they actually read, not for how they relate to the platform's own size.
+# Calling 9pt "normal" was indefensible: it is tiny in a window full of prose. The labels
+# describe the result and mark one as recommended; none of them announce which is
+# preselected, because the control already shows that.
 TEXT_SCALE_LABELS = {
-    1.0: "Tiny (your system default)",
+    1.0: "Tiny (matches your system font)",
     1.3: "Small",
     1.6: "Normal (recommended)",
     1.8: "Large",

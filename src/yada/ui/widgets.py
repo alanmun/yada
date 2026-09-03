@@ -535,6 +535,28 @@ class CheckableComboBox(QComboBox):
         self.view().viewport().installEventFilter(self)
         self._model.itemChanged.connect(self._on_item_changed)
 
+    def showPopup(self) -> None:  # Qt naming convention
+        """Size the popup from its own rows before opening it.
+
+        The explicit item hints in `set_options` are correct and were not enough. Inside
+        the settings window Qt opened this popup as a six-pixel sliver with a zero-height
+        viewport -- while every row reported 38 pixels -- which reads as "the language list
+        is empty". That was reported twice, and the first fix was verified only on Linux,
+        where it never reproduced.
+
+        Measured on Windows: clearing the application stylesheet fixed it, and re-applying
+        the *same* stylesheet also fixed it. So the container's cached geometry was the
+        problem rather than any rule. Re-polishing every widget in the app in order to open
+        a combo is not a fix; taking the height from the rows is, and it cannot be undone
+        by whatever a platform style decides to cache.
+        """
+        view = self.view()
+        rows = min(self.count(), self.maxVisibleItems())
+        row_height = view.sizeHintForRow(0) if self.count() else 0
+        if rows > 0 and row_height > 0:
+            view.setMinimumHeight(rows * row_height + 2 * view.frameWidth())
+        super().showPopup()
+
     # -- items --------------------------------------------------------------------------
 
     def set_options(self, options: list[tuple[str, str]], *, checked: list[str]) -> None:
