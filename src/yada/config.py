@@ -254,16 +254,40 @@ def from_dict(cls: type[T], data: Any) -> T:
 
 
 def load(path: Path | None = None) -> Settings:
+    """Read settings, tolerating a byte-order mark and never destroying what it cannot read.
+
+    Two things went wrong here at once, and they cost a real user their configuration.
+
+    `utf-8` rejects a leading BOM, and this file is documented as hand-editable -- so every
+    Windows editor and `Set-Content -Encoding UTF8` produces a file this refused to parse.
+    `utf-8-sig` strips a BOM when present and is identical otherwise.
+
+    Worse, falling back to defaults meant the next save overwrote the file, which the old
+    comment here described as intended. It is not: a settings file that cannot be parsed is
+    the user's data, and a tray app quietly replacing it with defaults is indistinguishable
+    from losing it. The unreadable file is moved aside first, so it can be recovered.
+    """
     p = path or config_path()
     if not p.exists():
         return Settings()
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
-        # A corrupt config should not brick a tray app. Fall back to defaults; the UI
-        # will show them and the next save overwrites the bad file.
+        _preserve_unreadable(p)
         return Settings()
     return from_dict(Settings, data)
+
+
+def _preserve_unreadable(p: Path) -> Path | None:
+    """Move an unparseable settings file aside. Returns where it went, or None."""
+    import time
+
+    keep = p.with_name(f"{p.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        p.replace(keep)
+    except OSError:
+        return None
+    return keep
 
 
 def save(settings: Settings, path: Path | None = None) -> None:

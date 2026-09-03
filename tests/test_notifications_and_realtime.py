@@ -242,3 +242,46 @@ def test_an_unrelated_error_is_not_retried_as_a_field_problem(monkeypatch):
         asyncio.run(session.connect())
     assert len(sent) == 1, "no retry for an error that is not about a field"
     assert openai_provider._UNSUPPORTED_FIELDS == {}
+
+
+# --------------------------------------------------------------------------------------
+# Settings must survive being hand-edited, and must never be silently replaced
+# --------------------------------------------------------------------------------------
+
+
+def test_a_settings_file_with_a_byte_order_mark_still_loads(tmp_path):
+    """PowerShell's `Set-Content -Encoding UTF8` writes a BOM, and so do many editors.
+
+    This file is documented as hand-editable, so refusing a BOM meant an ordinary Windows
+    edit made it unreadable -- and the old behaviour then overwrote it with defaults.
+    """
+    from yada import config
+
+    path = tmp_path / "settings.json"
+    settings = config.Settings()
+    settings.transcription.model = "gpt-live-transcribe"
+    config.save(settings, path)
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+
+    loaded = config.load(path)
+    assert loaded.transcription.model == "gpt-live-transcribe"
+
+
+def test_an_unreadable_settings_file_is_kept_not_overwritten(tmp_path):
+    """Losing a config to a parse error is losing the user's data."""
+    from yada import config
+
+    path = tmp_path / "settings.json"
+    path.write_text('{"transcription": {"model": "gpt-live-transcribe"', encoding="utf-8")
+    original = path.read_bytes()
+
+    loaded = config.load(path)
+    assert loaded.transcription.model == "", "defaults are used, so the app still starts"
+
+    kept = list(tmp_path.glob("settings.json.unreadable-*"))
+    assert len(kept) == 1, "the unreadable file must be preserved"
+    assert kept[0].read_bytes() == original, "preserved verbatim, so it can be recovered"
+
+    # And the app is free to write a fresh one.
+    config.save(loaded, path)
+    assert config.load(path).transcription.model == ""
