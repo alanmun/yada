@@ -899,17 +899,17 @@ class YadaApp(QObject):
         ):
             copy(result.final_text)
 
-        # Say which path ran, every time. "live" versus "uploaded on stop" is the whole
-        # question behind "it clearly is not transcribing live", and until now the only
-        # place that answer existed was a tooltip nobody thinks to hover.
         if result.warnings:
+            # A warning has to be read, so the panel stays up carrying it.
             self.tray.set_problem(" ".join(result.warnings))
             self.overlay.finish(result.final_text, status=result.warnings[0])
         else:
-            self.overlay.finish(
-                result.final_text,
-                status="Done — live" if result.streamed else "Done — uploaded on stop",
-            )
+            # Nothing to report, so the panel goes. The transcription chime has already
+            # confirmed it finished; a "Done" line afterwards is a second confirmation of
+            # something the user has just heard, and it outstays its welcome on screen.
+            # Whether the transcript came from the live socket or an upload is still on the
+            # tray tooltip, next to the word count and duration.
+            self.overlay.dismiss()
         for warning in result.warnings:
             self.tray.notify("yada", warning, warning=True)
 

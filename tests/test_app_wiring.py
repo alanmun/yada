@@ -76,22 +76,50 @@ def test_a_warning_reaches_the_tray_tooltip(yada, qapp):
     assert "Live transcription unavailable" in yada.overlay.text.text()
 
 
-def test_the_finished_result_says_which_path_ran(yada, qapp):
-    """ "Is it actually live?" has to be answerable without hovering a tooltip."""
-    for streamed, expected in ((True, "live"), (False, "uploaded")):
-        yada.bridge.on_finished(
-            SessionResult(
-                transcript="some words",
-                final_text="some words",
-                duration_seconds=1.0,
-                streamed=streamed,
-                transform=None,
-                warnings=[],
-            )
-        )
+def _finished(**overrides):
+    base = {
+        "transcript": "some words",
+        "final_text": "some words",
+        "duration_seconds": 1.0,
+        "streamed": True,
+        "transform": None,
+        "warnings": [],
+    }
+    return SessionResult(**{**base, **overrides})
+
+
+def test_a_clean_finish_removes_the_panel(yada, qapp):
+    """The transcription chime already confirmed it finished.
+
+    A "Done" line afterwards confirms something the user has just heard, and then sits on
+    screen outstaying its welcome.
+    """
+    yada.bridge.on_state(SessionState.RECORDING)
+    yada.bridge.on_partial("some words")
+    qapp.processEvents()
+    assert yada.overlay.isVisible()
+
+    yada.bridge.on_finished(_finished())
+    qapp.processEvents()
+    assert not yada.overlay.isVisible(), "nothing to say means nothing on screen"
+
+
+def test_a_finish_with_a_warning_keeps_the_panel_up(yada, qapp):
+    """A warning has to actually be read, so this one does not vanish."""
+    yada.bridge.on_finished(_finished(warnings=["Live transcription was unavailable"]))
+    qapp.processEvents()
+    assert yada.overlay.isVisible()
+    assert "unavailable" in yada.overlay.status.text()
+    assert "unavailable" in (yada.tray._problem or "")
+
+
+def test_whether_it_was_live_is_still_recorded_on_the_tray(yada, qapp):
+    """Removing the panel's "Done — live" must not lose the answer entirely."""
+    for streamed, expected in ((True, "streamed"), (False, "uploaded")):
+        yada.bridge.on_finished(_finished(streamed=streamed))
         qapp.processEvents()
-        assert expected in yada.overlay.status.text().lower(), (
-            f"streamed={streamed} should be reported as {expected}"
+        assert expected in yada.tray._status_line, (
+            f"streamed={streamed} should still be reported as {expected}"
         )
 
 

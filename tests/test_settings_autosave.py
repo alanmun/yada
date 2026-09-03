@@ -232,3 +232,79 @@ def test_a_refresh_arriving_mid_selection_waits_for_the_popup_to_close(qapp, win
     qapp.processEvents()
     assert combo.count() == 3, "and the deferred refresh applies once it closes"
     assert window.tf_model.current_model() == "x"
+
+
+# --------------------------------------------------------------------------------------
+# A widget that cannot show a value must not overwrite it
+# --------------------------------------------------------------------------------------
+
+
+def test_a_stored_value_a_combo_cannot_show_survives(qapp, window):
+    """Index 0 is the default in every one of these combos.
+
+    So falling back there turned "this value is not in the list" into "the user chose the
+    default", and the next autosave persisted it. The same shape replaced a configured
+    model with the newest one and a stored microphone with the system default; this is the
+    version of it that resets the pasting option.
+    """
+    settings = Settings()
+    settings.output.paste_mode = "after_transcription"
+    settings.theme = "some_future_theme"
+    settings.transcription.delay = "some_future_delay"
+    window.load(settings)
+    qapp.processEvents()
+
+    collected = window.collect()
+    assert collected.output.paste_mode == "after_transcription", "a valid value is kept"
+    assert collected.theme == "some_future_theme", (
+        "an unrecognised theme must not become 'blue'"
+    )
+    assert collected.transcription.delay == "some_future_delay", (
+        "an unrecognised delay must not become 'minimal'"
+    )
+
+
+def test_a_deliberate_choice_still_wins_over_the_stored_value(qapp, window):
+    """The fix must not go so far that changing a setting stops working."""
+    settings = Settings()
+    settings.output.paste_mode = "some_future_mode"
+    window.load(settings)
+    qapp.processEvents()
+
+    index = window.paste_mode.findData("after_transcription")
+    assert index >= 0
+    window.paste_mode.setCurrentIndex(index)
+    window.paste_mode.activated.emit(index)  # only a user selection emits this
+    qapp.processEvents()
+
+    assert window.collect().output.paste_mode == "after_transcription"
+
+
+def test_a_normal_change_is_still_collected(qapp, window):
+    settings = Settings()
+    settings.output.paste_mode = "off"
+    window.load(settings)
+    index = window.paste_mode.findData("after_transformation")
+    window.paste_mode.setCurrentIndex(index)
+    qapp.processEvents()
+    assert window.collect().output.paste_mode == "after_transformation"
+
+
+def test_the_text_scale_fallback_is_not_a_different_default(qapp, window):
+    """It used to be 2.0 while the app's own default is 1.6.
+
+    So a combo that could not show the stored scale did not merely reset it -- it jumped
+    the user to Largest, a value nothing else in the app considers the default.
+    """
+    settings = Settings()
+    settings.text_scale = 1.3
+    window.load(settings)
+    qapp.processEvents()
+    assert window.collect().text_scale == pytest.approx(1.3)
+
+    settings.text_scale = 1.55  # not one of TEXT_SCALES
+    window.load(settings)
+    qapp.processEvents()
+    assert window.collect().text_scale == pytest.approx(1.55), (
+        "an unrecognised scale must be preserved, not replaced with 2.0"
+    )

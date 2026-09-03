@@ -176,6 +176,9 @@ class SettingsWindow(QWidget):
         self._key_timers: dict[str, QTimer] = {}
         # True while a field is displaying a stored key rather than something typed.
         self._key_masked: dict[str, bool] = {}
+        # Combos whose stored value was not among their options, so `collect` must keep
+        # the stored value rather than report whatever the combo happens to be showing.
+        self._unresolved: set[QComboBox] = set()
 
         # Built before the tabs, because the Updates tab places it. Only appears once an
         # update is downloaded and waiting: restarting is the whole install step, so the
@@ -1104,19 +1107,27 @@ class SettingsWindow(QWidget):
         s.audio = dataclasses.replace(s.audio)
         s.output = dataclasses.replace(s.output)
 
-        s.transcription.provider = self.stt_provider.currentData() or "openai"
+        s.transcription.provider = self._chosen(
+            self.stt_provider, self._settings.transcription.provider
+        )
         s.transcription.model = self.stt_model.current_model()
         s.transcription.prefer_streaming = self.stt_streaming.isChecked()
-        s.transcription.delay = self.stt_delay.currentData() or "minimal"
+        s.transcription.delay = self._chosen(self.stt_delay, self._settings.transcription.delay)
 
         s.transform.enabled = self.tf_enabled.isChecked()
-        s.transform.provider = self.tf_provider.currentData() or "openai"
+        s.transform.provider = self._chosen(self.tf_provider, self._settings.transform.provider)
         s.transform.model = self.tf_model.current_model()
         s.transform.service_tier = str(
             ServiceTier.FAST if self.tf_priority.isChecked() else ServiceTier.STANDARD
         )
+        # The effort list is rebuilt from the model's capabilities and can legitimately be
+        # empty, so prefer what was stored over a literal; LOW is only the floor for the
+        # case where reasoning is on and nothing was ever chosen.
+        stored_effort = self._settings.transform.reasoning_effort
+        if stored_effort == str(ReasoningEffort.NONE):
+            stored_effort = str(ReasoningEffort.LOW)
         s.transform.reasoning_effort = (
-            str(self.tf_reasoning.currentData() or ReasoningEffort.LOW)
+            str(self.tf_reasoning.currentData() or stored_effort)
             if self.tf_reasoning_box.isChecked()
             else str(ReasoningEffort.NONE)
         )
@@ -1130,17 +1141,25 @@ class SettingsWindow(QWidget):
 
         # Never persist a shortcut that does not parse; keep the last one that did.
         s.hotkey.combo = self._last_valid_combo or "ctrl+shift+;"
-        s.hotkey.backend = self.hotkey_backend.currentData() or "auto"
+        s.hotkey.backend = self._chosen(self.hotkey_backend, self._settings.hotkey.backend)
 
         s.audio.device = self.audio_device.currentData()
         s.audio.input_gain = float(self.audio_gain.value())
 
-        s.theme = self.theme_combo.currentData() or "blue"
+        s.theme = self._chosen(self.theme_combo, self._settings.theme)
         s.start_on_login = self.start_on_login.isChecked()
         s.start_minimized = self.start_minimized.isChecked()
-        s.text_scale = float(self.text_scale.currentData() or 2.0)
+        # Not a literal: the old fallback here was 2.0 while the app's own default is 1.6,
+        # so a combo that could not show the stored scale silently jumped the user to
+        # Largest -- a default that is not even the default.
+        scale = self.text_scale.currentData()
+        s.text_scale = (
+            float(scale)
+            if scale and self.text_scale not in self._unresolved
+            else self._settings.text_scale
+        )
         s.updates_enabled = self.update_enabled.isChecked()
-        s.output.paste_mode = self.paste_mode.currentData() or "off"
+        s.output.paste_mode = self._chosen(self.paste_mode, self._settings.output.paste_mode)
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
         s.output.show_notifications = self.show_notifications.isChecked()
         s.output.show_overlay = self.show_overlay.isChecked()
@@ -1159,10 +1178,28 @@ class SettingsWindow(QWidget):
         s.output.chime_volume = self.chime_volume.value()
         return s
 
-    @staticmethod
-    def _select(combo: QComboBox, value) -> None:
+    def _select(self, combo: QComboBox, value) -> None:
+        """Show `value`, or record that this combo could not.
+
+        Deliberately does *not* fall back to index 0. In every combo here index 0 is the
+        default -- "off", "blue", "minimal", "openai" -- so snapping there turned "this
+        value is not in the list" into "the user chose the default", and the next autosave
+        wrote that over their setting. The same shape of bug replaced a configured model
+        with the newest one and a stored microphone with the system default.
+        """
         index = combo.findData(value)
-        combo.setCurrentIndex(index if index >= 0 else 0)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+            self._unresolved.discard(combo)
+        else:
+            self._unresolved.add(combo)
+
+    def _chosen(self, combo: QComboBox, stored: str) -> str:
+        """What the user picked, or the stored value when the combo never showed it."""
+        if combo in self._unresolved:
+            return stored
+        data = combo.currentData()
+        return str(data) if data else stored
 
     # ==================================================================================
     # Autosave
@@ -1222,6 +1259,11 @@ class SettingsWindow(QWidget):
                 child.toggled.connect(self._schedule_save)
             elif isinstance(child, QComboBox):
                 child.currentIndexChanged.connect(self._schedule_save)
+                # `activated` fires only for a real user selection, where
+                # currentIndexChanged also fires when load() sets the index -- so this is
+                # what distinguishes "they chose this" from "we could not show their
+                # value", and stops `collect` overriding a deliberate change.
+                child.activated.connect(lambda _index, combo=child: self._unresolved.discard(combo))
                 if child.isEditable():
                     child.editTextChanged.connect(self._schedule_save)
             elif isinstance(child, QLineEdit | PromptEditor):
