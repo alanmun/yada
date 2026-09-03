@@ -137,6 +137,9 @@ class OutputSettings:
     # the settings pane already convey. On Linux they are the ordinary way an app says
     # something went wrong, so they stay on.
     show_notifications: bool = field(default_factory=lambda: sys.platform != "win32")
+    # The live transcript panel. On by default: without it "transcribe while I speak" has
+    # no visible effect at all, which is indistinguishable from streaming not working.
+    show_overlay: bool = True
 
 
 @dataclass(slots=True)

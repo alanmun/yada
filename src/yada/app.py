@@ -53,6 +53,7 @@ from .providers.base import (
 from .providers.catalog import ModelCatalog
 from .providers.registry import SPECS, build_transcriber, build_transformer
 from .ui import wheelguard
+from .ui.overlay import LiveOverlay
 from .ui.settings_window import SettingsWindow
 from .ui.theme import apply_theme
 from .ui.tray import TrayIcon, ensure_tray_available
@@ -169,6 +170,8 @@ class YadaApp(QObject):
         )
 
         self.tray = TrayIcon(shortcut_label=self._shortcut_label())
+        # The only place live transcription is visible. Never takes focus; see overlay.py.
+        self.overlay = LiveOverlay()
         self._connect()
 
     # ==================================================================================
@@ -367,6 +370,7 @@ class YadaApp(QObject):
         self.bridge.quit_requested.connect(self.quit, Qt.ConnectionType.QueuedConnection)
         self.bridge.deliver_requested.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
         self.bridge.audio_level.connect(self._on_audio_level, Qt.ConnectionType.QueuedConnection)
+        self.bridge.partial.connect(self.overlay.set_partial, Qt.ConnectionType.QueuedConnection)
         self.bridge.provider_test_result.connect(
             self._on_provider_test_result, Qt.ConnectionType.QueuedConnection
         )
@@ -398,7 +402,17 @@ class YadaApp(QObject):
         return True
 
     def _on_session_state(self, state: SessionState) -> None:
-        """A dictation always wins the microphone; the meter steps aside."""
+        """Drive the overlay, and hand the microphone to the dictation.
+
+        The overlay says "Listening" until a delta arrives and "Transcribing live" once one
+        does. A dictation that never shows live text is therefore visibly not live -- a
+        distinction that could not be made from outside the app at all before.
+        """
+        if state is SessionState.RECORDING:
+            self.tray.set_problem(None)
+            self.overlay.begin()
+        elif state is SessionState.TRANSCRIBING:
+            self.overlay.set_status("Finishing…")
         if state is not SessionState.IDLE and self._level_capture is not None:
             self._stop_level_capture()
             if self.settings_window is not None:
@@ -462,6 +476,7 @@ class YadaApp(QObject):
 
     def _apply_notification_setting(self) -> None:
         self.tray.notifications_enabled = self.settings.output.show_notifications
+        self.overlay.set_enabled(self.settings.output.show_overlay)
 
     def _start_hotkey(self) -> None:
         try:
@@ -692,6 +707,8 @@ class YadaApp(QObject):
         # The meter holds a second stream on the same device; a lingering one is exactly
         # the "still holding the microphone" state described above.
         self._stop_level_capture()
+        with contextlib.suppress(Exception):
+            self.overlay.dismiss()
         if self._hotkey is not None:
             with contextlib.suppress(Exception):
                 self._hotkey.stop()
@@ -881,6 +898,18 @@ class YadaApp(QObject):
             self.settings.output.paste_mode == "off"
         ):
             copy(result.final_text)
+
+        # Say which path ran, every time. "live" versus "uploaded on stop" is the whole
+        # question behind "it clearly is not transcribing live", and until now the only
+        # place that answer existed was a tooltip nobody thinks to hover.
+        if result.warnings:
+            self.tray.set_problem(" ".join(result.warnings))
+            self.overlay.finish(result.final_text, status=result.warnings[0])
+        else:
+            self.overlay.finish(
+                result.final_text,
+                status="Done — live" if result.streamed else "Done — uploaded on stop",
+            )
         for warning in result.warnings:
             self.tray.notify("yada", warning, warning=True)
 
@@ -889,6 +918,8 @@ class YadaApp(QObject):
 
     def _on_error(self, message: str) -> None:
         self.tray.set_state(SessionState.IDLE)
+        self.tray.set_problem(message)
+        self.overlay.report(message)
         if message.startswith(self.NOT_CONFIGURED):
             # Show the window rather than a notification nobody will see, and land on the
             # tab that fixes it. Pressing the shortcut with no key set is the most likely
@@ -901,6 +932,11 @@ class YadaApp(QObject):
         self.tray.notify("yada", message, warning=True)
 
     def _on_warning(self, message: str) -> None:
+        # Three channels, because the toast is off by default on Windows and a warning that
+        # reaches nobody is why "live transcription unavailable" looked like yada simply
+        # being slow.
+        self.tray.set_problem(message)
+        self.overlay.report(message)
         self.tray.notify("yada", message, warning=True)
 
     def _on_update_status(self, status) -> None:

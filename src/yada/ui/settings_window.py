@@ -190,7 +190,7 @@ class SettingsWindow(QWidget):
         self.tabs.addTab(_scrollable(self._build_transform()), "Transform")
         self.tabs.addTab(_scrollable(self._build_vocabulary()), "Vocabulary")
         self.tabs.addTab(_scrollable(self._build_shortcut()), "Shortcut")
-        self.tabs.addTab(_scrollable(self._build_audio_output()), "Audio && output")
+        self.tabs.addTab(_scrollable(self._build_audio_output()), "System")
         self.tabs.addTab(_scrollable(self._build_updates()), "Updates")
 
         # No Save button. Every change is written as it is made, debounced so that typing
@@ -218,7 +218,7 @@ class SettingsWindow(QWidget):
 
         Derived from what the tab bar actually asks for rather than from a multiplier: at
         double text size the labels need roughly 1130px, and a guess that happened to work
-        at one scale clipped "Audio & output" at another. Capped to the screen, but never
+        at one scale clipped a longer tab label at another. Capped to the screen, but never
         below the minimum -- if the display genuinely cannot fit it, Qt scrolls the tab bar,
         which beats a window larger than the desktop.
         """
@@ -482,12 +482,22 @@ class SettingsWindow(QWidget):
             self.stt_delay.addItem(label, value)
         layout.addWidget(
             labelled(
-                "Speed vs accuracy",
+                "Live transcription delay",
                 self.stt_delay,
-                tip=(
-                    "Only used by providers that expose this dial. Actual timings vary by "
-                    "model, so it is worth trying a couple with your own voice."
-                ),
+                tip="Sets the realtime session's `delay` field.",
+            )
+        )
+        layout.addWidget(
+            hint(
+                "This is the `delay` field on OpenAI's realtime transcription session.\n\n"
+                "It sets how much audio the model waits for before it transcribes a chunk. "
+                "Minimal emits text as soon as possible. Higher settings let the model hear "
+                "more of the surrounding audio first, which can correct words that only make "
+                "sense once you have finished the sentence — at the cost of the text "
+                "appearing later.\n\n"
+                "It affects live transcription only. It does nothing on the upload path, "
+                "and only some models accept it at all: yada leaves it out for the ones "
+                "that refuse it, which is what the note below reports."
             )
         )
         self.stt_delay_note = hint("")
@@ -830,7 +840,9 @@ class SettingsWindow(QWidget):
                 device_holder,
                 tip=(
                     "Stored by name, not by position, so unplugging a headset will not silently "
-                    "switch you to the wrong microphone."
+                    "switch you to the wrong microphone. Windows lists each microphone once "
+                    "per audio subsystem; yada shows one entry per device and uses the best "
+                    "of them."
                 ),
             )
         )
@@ -884,6 +896,15 @@ class SettingsWindow(QWidget):
 
         notice_box = QGroupBox("Notifications")
         notice_layout = QVBoxLayout(notice_box)
+        self.show_overlay = QCheckBox("Show the live transcript while I dictate")
+        notice_layout.addWidget(self.show_overlay)
+        notice_layout.addWidget(
+            hint(
+                "A small panel near the bottom of the screen showing words as they are "
+                "transcribed, and why if they are not. It never takes focus and clicks pass "
+                "straight through it."
+            )
+        )
         self.show_notifications = QCheckBox("Show desktop notifications for problems")
         notice_layout.addWidget(self.show_notifications)
         notice_layout.addWidget(
@@ -1060,6 +1081,7 @@ class SettingsWindow(QWidget):
         self.tf_model.set_current(s.transform.model)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
         self.show_notifications.setChecked(s.output.show_notifications)
+        self.show_overlay.setChecked(s.output.show_overlay)
         self.chime_listening.set_enabled_state(s.output.chime_on_listening)
         self.chime_transcription.set_enabled_state(s.output.chime_on_transcription)
         self.chime_transformation.set_enabled_state(s.output.chime_on_transformation)
@@ -1121,6 +1143,7 @@ class SettingsWindow(QWidget):
         s.output.paste_mode = self.paste_mode.currentData() or "off"
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
         s.output.show_notifications = self.show_notifications.isChecked()
+        s.output.show_overlay = self.show_overlay.isChecked()
         s.output.chime_on_listening = self.chime_listening.is_enabled()
         s.output.chime_on_transcription = self.chime_transcription.is_enabled()
         s.output.chime_on_transformation = self.chime_transformation.is_enabled()

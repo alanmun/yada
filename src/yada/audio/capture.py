@@ -11,6 +11,8 @@ handed the same buffer and none of them care.
 
 from __future__ import annotations
 
+import dataclasses
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -36,6 +38,46 @@ class DeviceInfo:
     channels: int
     default_samplerate: float
     is_default: bool = False
+    hostapi: str = ""
+
+
+# Windows exposes one physical microphone through several host APIs -- WASAPI, DirectSound,
+# MME, WDM-KS -- so PortAudio enumerates the same device two to four times and the dropdown
+# reads as every microphone being duplicated. Preference order, best first: WASAPI is the
+# modern path, and MME is last because it truncates device names to 31 characters (which is
+# why a stored device name can be cut off mid-word).
+_HOSTAPI_PREFERENCE = (
+    "Windows WASAPI",
+    "Windows DirectSound",
+    "Windows WDM-KS",
+)
+# Below everything, including an API we do not recognise: MME is the legacy path and the
+# one that truncates names.
+_HOSTAPI_LAST = "MME"
+
+# MME's name limit. Used to match a truncated name against its full-length twin.
+_MME_NAME_LIMIT = 31
+
+
+def _hostapi_rank(name: str) -> int:
+    if name == _HOSTAPI_LAST:
+        return len(_HOSTAPI_PREFERENCE) + 1
+    try:
+        return _HOSTAPI_PREFERENCE.index(name)
+    except ValueError:
+        return len(_HOSTAPI_PREFERENCE)
+
+
+def _device_key(name: str) -> str:
+    """Identity of a physical device, tolerant of MME truncating the name.
+
+    The truncation tolerance is Windows-only, and deliberately so. ALSA device names
+    commonly share a long prefix and differ at the very end -- "... (hw:1,0)" against
+    "... (hw:2,0)" -- so trimming to 31 characters there would merge two real microphones
+    into one and hide a device the user needs.
+    """
+    normalized = " ".join(name.split()).lower()
+    return normalized[:_MME_NAME_LIMIT] if sys.platform == "win32" else normalized
 
 
 def list_input_devices() -> list[DeviceInfo]:
@@ -51,23 +93,52 @@ def list_input_devices() -> list[DeviceInfo]:
     try:
         default_in = sd.default.device[0]
         devices = sd.query_devices()
+        hostapis = [str(api.get("name", "")) for api in sd.query_hostapis()]
     except Exception as exc:
         raise AudioDeviceError(f"Could not enumerate audio devices: {exc}") from exc
 
-    out: list[DeviceInfo] = []
+    found: list[DeviceInfo] = []
     for idx, dev in enumerate(devices):
         if int(dev.get("max_input_channels", 0)) <= 0:
             continue
-        out.append(
+        api_index = int(dev.get("hostapi", -1))
+        found.append(
             DeviceInfo(
                 index=idx,
                 name=str(dev.get("name", f"device {idx}")),
                 channels=int(dev["max_input_channels"]),
                 default_samplerate=float(dev.get("default_samplerate") or 0.0),
                 is_default=(idx == default_in),
+                hostapi=hostapis[api_index] if 0 <= api_index < len(hostapis) else "",
             )
         )
-    return out
+
+    # One entry per physical device: the best host API for the stream, and the fullest name
+    # for the label, since the preferred API is not always the one with the longest name.
+    best: dict[str, DeviceInfo] = {}
+    labels: dict[str, str] = {}
+    defaults: set[str] = set()
+    for dev in found:
+        key = _device_key(dev.name)
+        labels[key] = max(labels.get(key, ""), dev.name, key=len)
+        # Being the system default belongs to the device, not to the enumeration that
+        # happened to carry the flag -- which is usually MME's, the one that loses on rank.
+        # Reading it off the winner alone dropped the marker entirely.
+        if dev.is_default:
+            defaults.add(key)
+        incumbent = best.get(key)
+        if incumbent is None or _hostapi_rank(dev.hostapi) < _hostapi_rank(incumbent.hostapi):
+            best[key] = dev
+
+    # Sorted by index so the order is stable and matches the host's own enumeration,
+    # rather than whatever order the grouping happened to produce.
+    return sorted(
+        (
+            dataclasses.replace(dev, name=labels[key], is_default=key in defaults)
+            for key, dev in best.items()
+        ),
+        key=lambda dev: dev.index,
+    )
 
 
 def peak_level(pcm16: bytes) -> float:
@@ -117,8 +188,16 @@ def resolve_device(name: str | None) -> int | None:
     """
     if not name:
         return None
-    for dev in list_input_devices():
+    devices = list_input_devices()
+    for dev in devices:
         if dev.name == name:
+            return dev.index
+    # A name stored before deduplication can be MME's 31-character truncation of the same
+    # device. Matching on the shared key keeps an existing setting working rather than
+    # silently reassigning the user to the system default.
+    key = _device_key(name)
+    for dev in devices:
+        if _device_key(dev.name) == key:
             return dev.index
     return None
 

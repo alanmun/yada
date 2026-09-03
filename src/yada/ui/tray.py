@@ -52,6 +52,12 @@ class TrayIcon(QObject):
         # Set from settings once they are loaded; see app.py::_apply_notification_setting.
         # Defaults to on so a notification is never lost before the setting is read.
         self.notifications_enabled = True
+        # The last thing that went wrong, kept on the tooltip. With notifications off --
+        # the default on Windows -- this was the promise that warnings would still be
+        # readable somewhere, and for a release it was not kept: every warning went to
+        # `notify()` and nowhere else, so a degraded transcription explained itself to
+        # nobody.
+        self._problem: str | None = None
 
         self._tray = QSystemTrayIcon(self._icons[SessionState.IDLE])
         self._tray.activated.connect(self._on_activated)
@@ -117,6 +123,10 @@ class TrayIcon(QObject):
         self._shortcut_label = label
         self._refresh()
 
+    def set_problem(self, message: str | None) -> None:
+        self._problem = (message or "").strip() or None
+        self._refresh()
+
     def set_result(self, result: SessionResult) -> None:
         self._last_text = result.final_text
         self._action_copy.setEnabled(bool(result.final_text))
@@ -151,15 +161,17 @@ class TrayIcon(QObject):
         recording = self._state is SessionState.RECORDING
         self._action_toggle.setText("Stop dictation" if recording else "Start dictation")
         # Busy states: the toggle would only produce a "still finishing" warning.
-        self._action_toggle.setEnabled(
-            self._state in (SessionState.IDLE, SessionState.RECORDING)
-        )
+        self._action_toggle.setEnabled(self._state in (SessionState.IDLE, SessionState.RECORDING))
 
         lines = [f"yada — {self._status_line}"]
         if self._shortcut_label:
             lines.append(f"Shortcut: {self._shortcut_label}")
         if self._update_ready:
             lines.append(f"Update {self._update_ready} ready")
+        if self._problem:
+            # Truncated: a tooltip is not a log, and a provider error can be a paragraph.
+            detail = self._problem if len(self._problem) <= 160 else self._problem[:157] + "…"
+            lines.append(f"Last problem: {detail}")
         self._tray.setToolTip("\n".join(lines))
 
     # -- notifications ------------------------------------------------------------------

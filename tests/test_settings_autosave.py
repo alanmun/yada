@@ -135,8 +135,8 @@ def test_focus_tab_finds_tabs_by_label(window):
     assert window.tabs.tabText(window.tabs.currentIndex()) == "Updates"
 
     # Labels carry Qt's mnemonic escaping; callers should not have to know that.
-    assert window.focus_tab("Audio & output") is True
-    assert window.tabs.tabText(window.tabs.currentIndex()) == "Audio && output"
+    assert window.focus_tab("System") is True
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "System"
 
     assert window.focus_tab("Providers") is True
     assert window.focus_tab("No Such Tab") is False
