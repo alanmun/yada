@@ -795,3 +795,55 @@ def test_a_missing_executable_reports_what_was_there_instead(install_root, tmp_p
 
 def test_describe_handles_an_empty_directory(tmp_path):
     assert github._describe(tmp_path) == "nothing at all"
+
+
+def test_a_failed_extraction_leaves_a_manifest(install_root, tmp_path, monkeypatch):
+    """The evidence used to be deleted along with the working directory.
+
+    Which is why "contains no yada.exe" could be reported twice with nothing to examine
+    either time. The directory still goes -- 200 MB of a broken release is not worth
+    keeping -- but a few hundred bytes describing it does not.
+    """
+    archive = _pack(tmp_path, "yada-9.9.9.tar.gz", as_zip=False)
+    monkeypatch.setattr(github, "_verify_extracted", lambda *_a, **_k: None)
+
+    real_flatten = github._flatten_single_dir
+
+    def flatten_then_remove(target):
+        real_flatten(target)
+        exe = target / core.executable_name()
+        if exe.exists():
+            exe.unlink()
+
+    monkeypatch.setattr(github, "_flatten_single_dir", flatten_then_remove)
+
+    with pytest.raises(github.UpdateError):
+        github.extract_release(archive, "9.9.9")
+
+    note = core.versions_dir() / ".failed-9.9.9.txt"
+    assert note.exists(), "a failure must leave something to look at"
+    body = note.read_text(encoding="utf-8")
+    assert "extraction of 9.9.9 failed" in body
+    assert "_internal" in body, "the manifest has to say what was actually there"
+    assert "total entries:" in body
+    assert not list(core.versions_dir().glob(".incoming-*")), "the directory itself still goes"
+
+
+def test_a_later_success_clears_the_manifest(install_root, tmp_path):
+    """A stale note about a version that now works would be misleading."""
+    note = core.versions_dir()
+    note.mkdir(parents=True, exist_ok=True)
+    stale = note / ".failed-9.9.9.txt"
+    stale.write_text("from an earlier attempt\n", encoding="utf-8")
+
+    archive = _pack(tmp_path, "yada-9.9.9.tar.gz", as_zip=False)
+    github.extract_release(archive, "9.9.9")
+
+    assert not stale.exists()
+
+
+def test_the_manifest_is_not_mistaken_for_an_installed_version(install_root, tmp_path):
+    """It lives in versions/, so it must not show up as a release."""
+    _install_fake("0.1.5")
+    (core.versions_dir() / ".failed-9.9.9.txt").write_text("note\n", encoding="utf-8")
+    assert [v.version for v in core.installed_versions()] == ["0.1.5"]

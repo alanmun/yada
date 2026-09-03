@@ -379,6 +379,30 @@ def _verify_extracted(target: Path, names: list[str]) -> None:
     )
 
 
+def _record_failure(staging_target: Path, version: str) -> None:
+    """Leave a note about what the half-extracted directory contained.
+
+    A failed extraction deletes its working directory, which is correct -- 200 MB of a
+    broken release is not worth keeping -- but it also destroyed the only evidence, so the
+    same failure was reported twice with nothing to examine either time. A few hundred
+    bytes of manifest costs nothing and makes the third time answerable.
+
+    Best effort throughout: this runs while already handling a failure and must not replace
+    the real error with its own.
+    """
+    note = staging_target.parent / f".failed-{version}.txt"
+    try:
+        lines = [f"extraction of {version} failed", f"staging: {staging_target.name}"]
+        for path in sorted(staging_target.rglob("*"))[:60]:
+            rel = path.relative_to(staging_target).as_posix()
+            lines.append(f"  {rel}{'/' if path.is_dir() else ''}")
+        total = sum(1 for _ in staging_target.rglob("*"))
+        lines.append(f"total entries: {total}")
+        note.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+
 def extract_release(archive: Path, version: str) -> Path:
     """Unpack into versions/<version>/, leaving no trace of whatever was there before.
 
@@ -434,14 +458,18 @@ def extract_release(archive: Path, version: str) -> Path:
                 "The version already there was left intact."
             ) from exc
     except UpdateError:
+        _record_failure(staging_target, version)
         shutil.rmtree(staging_target, ignore_errors=True)
         raise
     except Exception as exc:
+        _record_failure(staging_target, version)
         shutil.rmtree(staging_target, ignore_errors=True)
         raise UpdateError(f"could not extract {archive.name}: {exc}") from exc
 
     (target / ".complete").write_text(version + "\n", encoding="utf-8")
     archive.unlink(missing_ok=True)
+    with contextlib.suppress(OSError):
+        (versions / f".failed-{version}.txt").unlink(missing_ok=True)
     return target
 
 
