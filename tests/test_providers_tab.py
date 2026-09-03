@@ -86,3 +86,44 @@ def test_a_recommendation_falls_through_to_what_is_actually_offered():
     assert spec.recommended(Modality.TRANSCRIPTION, ["gpt-transcribe"]) == "gpt-transcribe"
     # Nothing curated is available: say nothing rather than invent a pick.
     assert spec.recommended(Modality.TRANSCRIPTION, ["something-else"]) == ""
+
+
+def test_openrouter_mirrors_the_openai_picks():
+    """OpenRouter is a router: its OpenAI models are the same models, prefixed.
+
+    Derived rather than hand-listed, so changing the OpenAI pick cannot leave OpenRouter
+    recommending last month's model.
+    """
+    openai, openrouter = SPECS["openai"], SPECS["openrouter"]
+
+    for modality, ours, theirs in (
+        (
+            Modality.TRANSCRIPTION,
+            openai.recommended_transcription,
+            openrouter.recommended_transcription,
+        ),
+        (Modality.TEXT, openai.recommended_transform, openrouter.recommended_transform),
+    ):
+        expected = [f"openai/{pick}" for pick in ours]
+        assert theirs[: len(expected)] == tuple(expected), (
+            f"{modality} should lead with the OpenAI picks, prefixed"
+        )
+        assert len(set(theirs)) == len(theirs), "no duplicates once fallbacks are appended"
+
+
+def test_a_mirrored_pick_openrouter_does_not_carry_falls_through():
+    """gpt-live-transcribe is not on OpenRouter in any form, checked against its catalogue.
+
+    Listing it first therefore has to cost nothing.
+    """
+    openrouter = SPECS["openrouter"]
+    assert openrouter.recommended_transcription[0] == "openai/gpt-live-transcribe"
+
+    offered = ["openai/gpt-transcribe", "openai/gpt-4o-transcribe", "deepgram/nova-3"]
+    assert openrouter.recommended(Modality.TRANSCRIPTION, offered) == "openai/gpt-transcribe"
+
+    # And where OpenRouter does carry the pick, it is used unchanged.
+    assert (
+        openrouter.recommended(Modality.TEXT, ["openai/gpt-5.6-luna", "google/gemini-3.8-flash"])
+        == "openai/gpt-5.6-luna"
+    )
