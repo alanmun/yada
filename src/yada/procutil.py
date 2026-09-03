@@ -200,6 +200,21 @@ def _posix_terminate(pid: int) -> None:
 # --------------------------------------------------------------------------------------
 
 
+# Suppress the console window Windows would otherwise create for a child process.
+# Without it, shelling out to PowerShell -- which is how a Start Menu shortcut gets written,
+# there being no pywin32 here -- flashes a black window on screen. That happens on every
+# startup, so pressing Restart produced a console flicker that looks like something
+# untrustworthy is happening rather than a shortcut being refreshed.
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def no_window_kwargs() -> dict[str, int]:
+    """Popen/run keyword arguments that keep a child process off the screen."""
+    if sys.platform == "win32":
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}
+
+
 def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False

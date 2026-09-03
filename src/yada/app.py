@@ -40,6 +40,7 @@ from .pipeline.session import (
     SessionState,
     Stage,
 )
+from .procutil import no_window_kwargs
 from .providers.base import (
     CacheMode,
     Modality,
@@ -291,6 +292,8 @@ class YadaApp(QObject):
                     check=False,
                     capture_output=True,
                     timeout=30,
+                    # Otherwise a console window flashes on screen every startup.
+                    **no_window_kwargs(),
                 )
 
         run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"

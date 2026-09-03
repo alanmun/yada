@@ -426,6 +426,23 @@ so an interrupted extraction is ignored rather than booted. A version that start
 times without reporting healthy stops being chosen, and the previous release is still on
 disk.
 
+### Windows rendering has to be checked on Windows
+
+yada's UI bugs have been overwhelmingly Windows-only: clipped checkmarks, spin-box arrows
+that kept the style's native metric while the field grew, and a language dropdown that
+opened with a zero-height viewport. Every one was invisible on Linux, and the dropdown was
+"fixed" twice from a Linux screenshot before it was ever reproduced.
+
+`scripts/win-qt-harness.ps1` builds a throwaway venv with PySide6 and yada's `src/` on the
+path, so the real `SettingsWindow` and the real stylesheet can be driven on the platform
+that renders them. It is ~700 MB, so it is created on demand and removed after.
+
+Measure geometry rather than reading a screenshot. The language popup reported 38-pixel
+rows while its viewport was 0 — a screenshot showed an empty box and explained nothing,
+whereas `view.height()` against `view.viewport().height()` named the problem immediately,
+and clearing the stylesheet then re-applying the *same* stylesheet located it in Qt's
+cached container geometry rather than in any rule.
+
 ## Packaging, and three traps in it
 
 Built with PyInstaller in **one-dir** mode. One-file re-extracts the whole bundle to a temp

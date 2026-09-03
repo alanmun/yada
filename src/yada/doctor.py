@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config, secrets
+from .procutil import no_window_kwargs
 from .providers.registry import SPECS
 
 OK = "ok"
@@ -344,6 +345,7 @@ def _antivirus_checks() -> list[Check]:
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
             capture_output=True,
             text=True,
+            **no_window_kwargs(),
             # Deliberately inside CHECK_TIMEOUT_SECONDS. At 25s against a 20s group
             # deadline the group was always abandoned first, so this timeout could never
             # fire and its own error handling was dead code -- while Defender's history,

@@ -291,3 +291,30 @@ def test_processes_under_matches_by_path_and_skips_our_own(tmp_path, monkeypatch
 
 def test_processes_under_an_absent_directory_is_empty(tmp_path):
     assert procutil.processes_under(tmp_path / "nope") == []
+
+
+def test_child_processes_are_kept_off_the_screen(monkeypatch):
+    """A PowerShell child with no creationflags flashes a console window.
+
+    Writing the Start Menu shortcut shells out to PowerShell -- there is no pywin32 here --
+    and that runs on every startup, so pressing Restart produced a black flicker that looks
+    like something untrustworthy rather than a shortcut being refreshed.
+    """
+    monkeypatch.setattr(procutil.sys, "platform", "win32")
+    kwargs = procutil.no_window_kwargs()
+    assert kwargs == {"creationflags": 0x08000000}, "CREATE_NO_WINDOW"
+
+    monkeypatch.setattr(procutil.sys, "platform", "linux")
+    assert procutil.no_window_kwargs() == {}, "there is no such flag off Windows"
+
+
+def test_the_shortcut_helper_passes_the_flag(monkeypatch):
+    """Asserting the call site, because the flag is invisible in behaviour from a test."""
+    import inspect
+
+    from yada import app as app_module
+
+    source = inspect.getsource(app_module.YadaApp._sync_windows_integration)
+    assert "no_window_kwargs()" in source, (
+        "the PowerShell call must suppress its console window"
+    )
