@@ -115,6 +115,16 @@ def _scrollable(inner: QWidget) -> QScrollArea:
     return area
 
 
+def _inside_composite(widget: QWidget, composites: tuple[type, ...]) -> bool:
+    """True when `widget` is plumbing belonging to one of `composites`."""
+    parent = widget.parentWidget()
+    while parent is not None:
+        if isinstance(parent, composites):
+            return True
+        parent = parent.parentWidget()
+    return False
+
+
 def _recommendation_lines(spec) -> list[str]:
     """The curated pick per modality, as lines for the provider panel.
 
@@ -566,17 +576,28 @@ class SettingsWindow(QWidget):
     def set_transform_capabilities(
         self, *, reasoning: Support, efforts: tuple[ReasoningEffort, ...], priority: Support
     ) -> None:
-        """Called after capability discovery, which may be a live probe."""
+        """Called after capability discovery, which may be a live probe.
+
+        Signals are blocked while the effort list is rebuilt. Without that, refilling the
+        combo counted as the user editing it, which scheduled a save -- and the app calls
+        this *from* the save handler, so the two fed each other about three times a second,
+        forever. Every one of those cycles also repopulated the model pickers, which is what
+        made the model dropdown flicker and impossible to click.
+        """
         self.tf_priority.set_support(priority)
         self.tf_reasoning_box.set_support(reasoning)
         current = self.tf_reasoning.currentData()
-        self.tf_reasoning.clear()
-        for effort in efforts or ():
-            self.tf_reasoning.addItem(str(effort), str(effort))
-        if current:
-            index = self.tf_reasoning.findData(current)
-            if index >= 0:
-                self.tf_reasoning.setCurrentIndex(index)
+        self.tf_reasoning.blockSignals(True)
+        try:
+            self.tf_reasoning.clear()
+            for effort in efforts or ():
+                self.tf_reasoning.addItem(str(effort), str(effort))
+            if current:
+                index = self.tf_reasoning.findData(current)
+                if index >= 0:
+                    self.tf_reasoning.setCurrentIndex(index)
+        finally:
+            self.tf_reasoning.blockSignals(False)
         self._on_reasoning_toggled(self.tf_reasoning_box.isChecked())
 
     def _on_mic_test_toggled(self, active: bool) -> None:
@@ -1148,13 +1169,33 @@ class SettingsWindow(QWidget):
             # setting, and saving on it would write a file for a click that changed nothing.
             if child is getattr(self, "provider_chooser", None):
                 continue
-            if isinstance(child, ChimeRow | VolumeRow | StringListEditor | ModelPicker):
-                child.changed.connect(self._schedule_save)
-            elif isinstance(child, SoundLibraryEditor):
-                child.library_changed.connect(self._schedule_save)
-            elif isinstance(child, StepsEditor):
-                child.changed.connect(self._schedule_save)
-            elif isinstance(child, QCheckBox):
+            composites = (
+                ChimeRow,
+                VolumeRow,
+                StringListEditor,
+                ModelPicker,
+                SoundLibraryEditor,
+                StepsEditor,
+            )
+            if isinstance(child, composites):
+                if isinstance(child, SoundLibraryEditor):
+                    child.library_changed.connect(self._schedule_save)
+                else:
+                    child.changed.connect(self._schedule_save)
+                continue
+            # A composite widget reports its own changes, so wiring the plumbing inside it
+            # as well is not merely redundant -- it is a feedback loop.
+            #
+            # `findChildren` returns a ModelPicker *and* the QComboBox and QLineEdit inside
+            # it. The inner line edit got `textChanged` connected here, and blocking signals
+            # on the combo does not block the line edit: they are different objects. So
+            # repopulating the model list scheduled a save, the app pushes fresh state into
+            # the window from its save handler, and that repopulated the list again -- about
+            # three times a second, indefinitely. It is why the model dropdown flickered and
+            # could not be clicked.
+            if _inside_composite(child, composites):
+                continue
+            if isinstance(child, QCheckBox):
                 child.toggled.connect(self._schedule_save)
             elif isinstance(child, QComboBox):
                 child.currentIndexChanged.connect(self._schedule_save)

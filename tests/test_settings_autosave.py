@@ -151,3 +151,84 @@ def test_reopening_the_window_does_not_discard_a_pending_edit(window, monkeypatc
     window.flush_pending_save()
     assert window._saves, "the pending change must be committed, not dropped"
     assert window._saves[-1].output.always_copy_to_clipboard is False
+
+
+# --------------------------------------------------------------------------------------
+# Autosave must not feed itself
+# --------------------------------------------------------------------------------------
+
+
+def _text_models(*ids):
+    from yada.providers.base import Modality, ModelInfo
+
+    return [ModelInfo(id=i, provider="fake", modality=Modality.TEXT) for i in ids]
+
+
+def test_repopulating_a_model_list_does_not_schedule_a_save(qapp, window, monkeypatch):
+    """The flicker bug, stated as the loop it was.
+
+    `findChildren` returns a ModelPicker *and* the QComboBox and QLineEdit inside it, so
+    the inner line edit had `textChanged` wired to autosave -- and blocking signals on the
+    combo does not block the line edit, they are different objects. Repopulating scheduled
+    a save; the app pushes fresh state into the window from its save handler; that
+    repopulated the list again. About three times a second, indefinitely, which destroyed
+    the popup under the pointer every time.
+    """
+    scheduled = []
+    monkeypatch.setattr(window, "_schedule_save", lambda *_a: scheduled.append(1))
+
+    window.tf_model.set_models(_text_models("a", "b"), current="a")
+    window.stt_model.set_models(_text_models("c", "d"), current="")
+    qapp.processEvents()
+
+    assert scheduled == [], "syncing the UI from settings is not the user editing it"
+
+
+def test_pushing_capabilities_does_not_schedule_a_save(qapp, window, monkeypatch):
+    """The same loop by the other route: the effort list is rebuilt from the save handler."""
+    from yada.providers.base import ReasoningEffort, Support
+
+    scheduled = []
+    monkeypatch.setattr(window, "_schedule_save", lambda *_a: scheduled.append(1))
+
+    window.set_transform_capabilities(
+        reasoning=Support.SUPPORTED,
+        efforts=tuple(ReasoningEffort),
+        priority=Support.SUPPORTED,
+    )
+    qapp.processEvents()
+    assert scheduled == []
+
+
+def test_a_user_choosing_a_model_still_saves(qapp, window, monkeypatch):
+    """The fix must not go so far that a real selection stops being recorded."""
+    window.tf_model.set_models(_text_models("a", "b"), current="a")
+    scheduled = []
+    monkeypatch.setattr(window, "_schedule_save", lambda *_a: scheduled.append(1))
+
+    window.tf_model.combo.setCurrentIndex(window.tf_model.combo.findData("b"))
+    qapp.processEvents()
+
+    assert scheduled, "picking a different model is an edit and must be saved"
+    assert window.tf_model.current_model() == "b"
+
+
+def test_a_refresh_arriving_mid_selection_waits_for_the_popup_to_close(qapp, window):
+    """Rebuilding an open list destroys the item under the pointer."""
+    window.tf_model.set_models(_text_models("a", "b"), current="a")
+    combo = window.tf_model.combo
+
+    combo.showPopup()
+    qapp.processEvents()
+    if not combo.view().isVisible():
+        pytest.skip("this platform will not show a combo popup offscreen")
+
+    # `current` is in the new list, so the count is exactly the models -- a pinned
+    # "not in the discovered list" entry would otherwise make this read as off-by-one.
+    window.tf_model.set_models(_text_models("x", "y", "z"), current="x")
+    assert combo.count() == 2, "the open list must not be rebuilt underneath the user"
+
+    combo.hidePopup()
+    qapp.processEvents()
+    assert combo.count() == 3, "and the deferred refresh applies once it closes"
+    assert window.tf_model.current_model() == "x"

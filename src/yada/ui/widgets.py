@@ -93,9 +93,7 @@ class HintLabel(QLabel):
                 palette.color(QPalette.ColorRole.WindowText), background, self.MUTED_BLEND
             )
         else:
-            light_variant, dark_variant = (
-                self._WARNING if self._tone == "warning" else self._ERROR
-            )
+            light_variant, dark_variant = self._WARNING if self._tone == "warning" else self._ERROR
             colour = QColor(dark_variant if _is_dark(background) else light_variant)
         # Only the colour is set. The font size is left alone deliberately: dimmed text is
         # already secondary, and shrinking it as well made it unreadable.
@@ -156,12 +154,16 @@ class ModelPicker(QWidget):
         # the window opens, and without this the combo is empty in between -- so the
         # autosave that follows any edit wrote that emptiness back over the user's model.
         self._configured = ""
+        # A repopulation that arrived while the popup was open, held until it closes.
+        self._pending: tuple[list[ModelInfo], str, str] | None = None
 
         self.combo = QComboBox()
         self.combo.setEditable(True)  # free text always permitted
         self.combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.combo.setMinimumWidth(280)
         self.combo.currentTextChanged.connect(self._on_changed)
+        # The popup closing is the moment a deferred refresh becomes safe to apply.
+        self.combo.view().installEventFilter(self)
 
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setToolTip("Ask the provider which models it currently offers.")
@@ -206,10 +208,36 @@ class ModelPicker(QWidget):
             self.combo.setCurrentIndex(0)
         self.combo.blockSignals(False)
 
+    def eventFilter(self, watched, event) -> bool:  # Qt naming convention
+        if (
+            watched is self.combo.view()
+            and event.type() == QEvent.Type.Hide
+            and self._pending is not None
+        ):
+            models, current, recommended = self._pending
+            self._pending = None
+            self._apply_models(models, current=current, recommended=recommended)
+        return super().eventFilter(watched, event)
+
     def set_models(
         self, models: Iterable[ModelInfo], *, current: str, recommended: str = ""
     ) -> None:
+        """Replace the list, unless the user is currently looking at it.
+
+        Rebuilding an open popup destroys the item under the pointer, so a click lands on
+        nothing. Discovery finishing, or any other background refresh, must not decide the
+        moment a selection is being made -- it waits for the popup to close.
+        """
+        models = list(models)
         self._configured = current or self._configured
+        if self.combo.view().isVisible():
+            self._pending = (models, current, recommended)
+            return
+        self._apply_models(models, current=current, recommended=recommended)
+
+    def _apply_models(
+        self, models: list[ModelInfo], *, current: str, recommended: str = ""
+    ) -> None:
         self.combo.blockSignals(True)
         self.combo.clear()
         if self._allow_auto:

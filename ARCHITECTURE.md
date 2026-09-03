@@ -165,6 +165,28 @@ lists 19 transcription models and several hundred text ones, so its picks come f
 public catalogue rather than end-to-end measurement — with `openai/gpt-transcribe` first
 because that is the one model in the list yada has actually benchmarked.
 
+### Autosave must never be able to feed itself
+
+`findChildren(QWidget)` returns a composite widget *and* its internals. A `ModelPicker` is
+one widget to the app and three to Qt, so wiring the loop's `elif isinstance(child,
+QLineEdit)` branch connected the combo's own line edit straight to the debounce — and
+`blockSignals` on the combo does not block the line edit, because they are different
+QObjects.
+
+That closed a circuit: repopulating the model list scheduled a save, the app pushes fresh
+state into the window *from its save handler*, and that repopulated the list again. Measured
+at seven saves in two and a half seconds, indefinitely, whenever the window was open with a
+populated list. What the user saw was a model dropdown that flickered and could not be
+clicked, because the popup was being destroyed under the pointer three times a second.
+
+Two rules came out of it:
+
+* A composite reports its own changes; nothing inside one is wired individually.
+  `_inside_composite` enforces it for every child, so the next composite widget is safe by
+  default rather than by remembering.
+* A refresh that arrives while a combo popup is open is **deferred until it closes**.
+  Discovery finishing must not get to decide the moment a selection is being made.
+
 ### The settings window must never report a model the user did not choose
 
 Discovery arrives after the window opens. In between the combo is empty, and an empty combo
