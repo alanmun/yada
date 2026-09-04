@@ -321,11 +321,23 @@ nowhere, which is worse than declining. On Wayland without ydotool the honest fl
 clipboard-only, and the explanation says Wayland's design is the reason rather than
 implying yada could do better — because on Wayland it deliberately cannot.
 
-`org.freedesktop.portal.RemoteDesktop` is the sanctioned Wayland route and would remove the
-ydotool requirement entirely. `dbus-fast` is already a dependency for the GlobalShortcuts
-portal, so the plumbing exists. It is not implemented, and it should not be written blind:
-the GlobalShortcuts backend has never run against a real Plasma compositor either, and
-adding a second unverifiable portal backend would compound that rather than fix anything.
+* **portal** — `org.freedesktop.portal.RemoteDesktop`, the sanctioned Wayland route. The
+  compositor prompts once and yada then synthesises the keystroke *through* the portal
+  rather than around it, so Wayland needs nothing installed either. Preferred over ydotool:
+  a one-off approval asks less than a daemon plus a udev group plus a re-login, and
+  `ydotool` being on PATH says nothing about whether `ydotoold` is actually running.
+
+Two things shape the portal backend, both about not freezing the app. The session is
+established in the background, so `paste()` never waits on a consent dialog — the first
+paste says approval is pending and leaves the text on the clipboard, and the next one
+works; blocking the Qt thread on a modal system dialog would hang the window. And every
+portal call has a timeout, so a portal that never answers costs one message rather than a
+wedged application. The portal's `restore_token` is kept in the config directory so the
+prompt is genuinely one-off.
+
+It is written but **not verified against a real compositor** — same gap as the
+GlobalShortcuts backend, which has also never run against real Plasma. It fails closed:
+every failure is reported and the clipboard still has the text.
 
 
 

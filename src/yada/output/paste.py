@@ -24,6 +24,8 @@ import subprocess
 import sys
 from typing import Protocol, runtime_checkable
 
+from .portal_paste import PortalPasteBackend
+
 # Linux input event codes, from <linux/input-event-codes.h>. ydotool speaks these directly,
 # which is more stable across versions than its named-key syntax.
 KEY_LEFTCTRL = 29
@@ -312,10 +314,11 @@ class NoPasteBackend:
             return "Automatic pasting is unavailable."
         if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland":
             return (
-                "Wayland deliberately does not let one application press keys in another, "
-                "so there is no equivalent of the X11 route yada uses elsewhere. Text is "
-                "copied to the clipboard and you paste it with Ctrl+V.\n\n"
-                "To enable automatic pasting:\n" + YDOTOOL_INSTALL_HINT
+                "Wayland deliberately does not let one application press keys in another. "
+                "yada normally asks the desktop's RemoteDesktop portal to do it instead, "
+                "but this session does not offer one, so text is copied to the clipboard "
+                "and you paste it with Ctrl+V.\n\n"
+                "To enable automatic pasting anyway:\n" + YDOTOOL_INSTALL_HINT
             )
         return (
             "No way to send a keystroke was found in this session, so text is copied to "
@@ -328,9 +331,16 @@ class NoPasteBackend:
 
 def create_paste_backend() -> PasteBackend:
     """Best available backend. Never returns None; NoPasteBackend is the honest floor."""
-    # X11 before ydotool: XTEST needs nothing installed, so preferring it means an X11
-    # user is never told to set up a daemon they do not need.
-    for backend in (Win32PasteBackend, X11PasteBackend, YdotoolPasteBackend):
+    # Ordered by how little each asks of the user. XTEST and the portal both need nothing
+    # installed; the portal is preferred over ydotool because a one-off approval dialog is
+    # less to ask than a daemon, a udev group and a reboot -- and because ydotool being on
+    # PATH says nothing about whether ydotoold is actually running.
+    for backend in (
+        Win32PasteBackend,
+        X11PasteBackend,
+        PortalPasteBackend,
+        YdotoolPasteBackend,
+    ):
         if backend.available():
             return backend()
     return NoPasteBackend()

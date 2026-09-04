@@ -30,7 +30,7 @@ Ctrl+Shift+;  ──▶  🔴 recording  ──▶  Ctrl+Shift+;  ──▶  ♪
 
 I really enjoyed using [Whispering](https://github.com/epicenter-md/epicenter), but the app like many apps went stale and stopped receiving updates. In the age of AI I figured I'd just make my own, exactly the way I like it. I'll speak to my design preferences/quality goals here:
 
-- **No more getting stuck on last year's models**: Models are discovered at runtime whenever possible. Set the model to *Automatic* and it follows whatever the provider currently recommends. New models are usable the day they ship, without an update to yada. 
+- **No more getting stuck on last year's models**: Models are discovered at runtime whenever possible. You can even set the model to *Automatic* and it follows whatever the provider currently recommends. New models are usable the day they ship, without an update to yada. 
   - **Capabilities are discovered too.** Where a provider publishes what a model supports, yada reads it. Where it does not, yada measures it with a single cheap request and remembers the answer.
 - **Providers are pluggable.** OpenAI and OpenRouter are supported today, future integrations should be easily extensible without rewriting 6 python files.
 - **Privacy**: Local models are supported, and you can upload custom ones and configure them yourself, so you're not forced to use only what an app officially supports.
@@ -40,17 +40,30 @@ I really enjoyed using [Whispering](https://github.com/epicenter-md/epicenter), 
 
 ## Install
 
-Download the archive for your platform from
-[Releases](https://github.com/alanmun/yada/releases), extract it, and **double-click
-`INSTALL`** (`INSTALL.exe` on Windows). That is the whole process — no command line, no
-administrator rights. Everything goes under your own user profile.
+Download the archive for your platform from [Releases](https://github.com/alanmun/yada/releases), extract the whole folder, and **double-click `yada`** (`yada.exe` on Windows). It installs itself under your own user profile and starts. No command line, no administrator rights, and nothing to run as admin.
 
-Windows will warn that the publisher is unrecognised, because these binaries are not
-code-signed: choose **More info** then **Run anyway**.
+After that yada keeps itself up to date: it checks in the background, downloads and verifies the next release while you work, and applies it the next time it starts.
 
-If yada installs and then disappears — no tray icon, a Start Menu shortcut that will not
-start — check Windows Security → Protection history. Unsigned programs that start with
-Windows do get caught by heuristics, and `yada doctor` will tell you if that has happened.
+### Troubleshooting for Windows
+
+Windows might warn that the publisher is unrecognised, because these binaries are not code-signed: choose _More info_ then _Run anyway_.
+
+Rarely, Windows Defender removes an unsigned program that sets itself to start with Windows. If yada installs and then vanishes — no tray icon, and a Start Menu shortcut that does nothing — that is what happened. To get it back:
+
+1. **Confirm it.** Run `yada doctor` (see below); it reports what Defender has taken, if anything. Or open **Windows Security → Virus & threat protection → Protection history** and look for an item naming `yada`.
+2. **Restore the file.** In Protection history, open that item and choose **Actions → Restore**. Defender will keep quarantining it unless you do the next step too.
+3. **Allow the folder.** **Virus & threat protection → Manage settings → Exclusions → Add or remove exclusions → Add an exclusion → Folder**, and choose:
+
+   ```
+   %LOCALAPPDATA%\yada
+   ```
+
+   That is yada's own folder inside your user profile, so this does not lower protection anywhere else.
+4. **Start yada again** from the Start Menu, or re-run `yada.exe` from the extracted folder.
+
+If you would rather not add an exclusion, yada still works if you start it yourself each time — it is only the "start with Windows" registration that triggers this. Turn that off in **Settings → System → Start yada when I log in**.
+
+It is also worth [reporting the file to Microsoft as a false positive](https://www.microsoft.com/en-us/wdsi/filesubmission), which is what actually gets the detection removed for everyone. The real fix is code signing, which is on the list.
 
 Then open Settings from the tray icon and paste an API key.
 
@@ -78,7 +91,20 @@ KDE Plasma supports this well where you just need to approve a dialog once.
 > ```
 
 **Auto-paste.** Text is always copied to your clipboard, which needs no special permission.
-Pressing Ctrl+V for you requires [`ydotool`](https://github.com/ReimuNotMoe/ydotool):
+Pressing Ctrl+V for you needs nothing installed on any of the three:
+
+| Session | How | Setup |
+|---|---|---|
+| Windows | `SendInput` | none |
+| X11 | the `XTEST` extension | none |
+| Wayland | the XDG `RemoteDesktop` portal | approve one dialog |
+
+On Wayland the portal is the sanctioned way to ask: the compositor prompts you once, and
+yada then synthesises the keystroke *through* it rather than around it. yada remembers the
+portal's token, so the prompt does not come back on every launch.
+
+If your desktop has no RemoteDesktop portal, [`ydotool`](https://github.com/ReimuNotMoe/ydotool)
+still works, by injecting below the compositor:
 
 ```sh
 sudo apt install ydotool
@@ -86,8 +112,8 @@ sudo systemctl enable --now ydotoold
 sudo usermod -aG input $USER   # then log out and back in
 ```
 
-Without it, auto-paste is unavailable and yada says so in Settings rather than failing
-quietly at paste time. On Windows both features work with no setup.
+With none of those, auto-paste is unavailable and yada says so in Settings rather than
+failing quietly at paste time.
 
 ## Configuration
 
@@ -128,12 +154,6 @@ git tag v0.2.0 && git push --tags           # CI builds, signs and publishes
 
 Installed copies pick the release up in the background within a few hours and use it at next
 launch.
-
-## Prior art
-
-yada exists because  got the shape
-right and then stopped being updated. The two-stage transcribe-then-transform pipeline and
-the ordered-steps model for transformations are its ideas, and they are good ones.
 
 ## Licence
 
