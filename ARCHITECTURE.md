@@ -305,6 +305,30 @@ is noise if no transform is configured.
 
 ## Auto-paste
 
+Three backends, picked in order of how little they ask of the user:
+
+* **win32** — SendInput. See the packaging notes for the structure-size trap.
+* **xtest** — X11's XTEST extension, via ctypes. Needs nothing installed and no daemon;
+  it is how `xdotool` does the same job. Its absence was a plain gap rather than a platform
+  limitation: yada told X11 users that pasting "requires ydotool", which was true of yada
+  and not of their system.
+* **ydotool** — injects below the compositor via `/dev/uinput`, so it is the only one of
+  the three that works on Wayland. Needs a daemon and group membership.
+
+XTEST is deliberately *not* used on Wayland even though XWayland answers there: it reaches
+X11 clients only, so a paste aimed at a native Wayland window lands somewhere unintended or
+nowhere, which is worse than declining. On Wayland without ydotool the honest floor is
+clipboard-only, and the explanation says Wayland's design is the reason rather than
+implying yada could do better — because on Wayland it deliberately cannot.
+
+`org.freedesktop.portal.RemoteDesktop` is the sanctioned Wayland route and would remove the
+ydotool requirement entirely. `dbus-fast` is already a dependency for the GlobalShortcuts
+portal, so the plumbing exists. It is not implemented, and it should not be written blind:
+the GlobalShortcuts backend has never run against a real Plasma compositor either, and
+adding a second unverifiable portal backend would compound that rather than fix anything.
+
+
+
 Off by default. When on, the target is chosen explicitly: after transcription, or after
 transformation. Clipboard write always happens; keystroke injection is best-effort behind a
 detected backend:

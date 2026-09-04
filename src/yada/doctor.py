@@ -210,19 +210,31 @@ def _paste_checks() -> list[Check]:
     from .output import NoPasteBackend, create_paste_backend
 
     backend = create_paste_backend()
-    if isinstance(backend, NoPasteBackend):
-        return [
-            Check(
-                "Auto-paste",
-                WARN,
-                "unavailable — text will be copied to the clipboard only",
-                "Optional. To enable it on Wayland:\n"
-                "      sudo apt install ydotool\n"
-                "      sudo systemctl enable --now ydotoold\n"
-                "      sudo usermod -aG input $USER   (then log out and back in)",
-            )
-        ]
-    return [Check("Auto-paste", OK, f"available via {backend.name}")]
+    if not isinstance(backend, NoPasteBackend):
+        return [Check("Auto-paste", OK, f"available via {backend.name}")]
+
+    # Only reached with no way to send a keystroke at all. Naming Wayland unconditionally
+    # would be wrong for anyone not running it -- and yada used to say "requires ydotool"
+    # to X11 users, who need nothing at all.
+    on_wayland = bool(os.environ.get("WAYLAND_DISPLAY")) or (
+        os.environ.get("XDG_SESSION_TYPE") == "wayland"
+    )
+    reason = (
+        "Wayland does not let one application press keys in another"
+        if on_wayland
+        else "no X display and no ydotool in this session"
+    )
+    return [
+        Check(
+            "Auto-paste",
+            WARN,
+            f"unavailable ({reason}) — text will be copied to the clipboard only",
+            "Optional. To enable it:\n"
+            "      sudo apt install ydotool\n"
+            "      sudo systemctl enable --now ydotoold\n"
+            "      sudo usermod -aG input $USER   (then log out and back in)",
+        )
+    ]
 
 
 def _credential_checks() -> list[Check]:

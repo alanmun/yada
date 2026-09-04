@@ -17,6 +17,8 @@ ydotool asks once, at install time, and then works.
 
 from __future__ import annotations
 
+import ctypes
+import os
 import shutil
 import subprocess
 import sys
@@ -161,6 +163,105 @@ class Win32PasteBackend:
         return "Pastes by sending Ctrl+V to the focused window."
 
 
+class X11PasteBackend:
+    """Pastes on X11 using the XTEST extension.
+
+    No daemon, no extra permissions, no package to install: XTEST ships with every X
+    server and is how `xdotool` does the same job. Its absence here was a straightforward
+    gap rather than a platform limitation -- yada told X11 users that pasting "requires
+    ydotool", which was true of yada and not of their system.
+
+    Deliberately not used on Wayland even when an X server is reachable. Under XWayland,
+    XTEST reaches X11 clients only, so a paste aimed at a native Wayland window either
+    lands somewhere unintended or nowhere at all -- which is worse than saying no.
+    """
+
+    name = "xtest"
+
+    @staticmethod
+    def available() -> bool:
+        if sys.platform == "win32" or not os.environ.get("DISPLAY"):
+            return False
+        # A Wayland session is Wayland's to handle, even though XWayland answers here.
+        if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland":
+            return False
+        return _x11_libraries() is not None
+
+    def paste(self) -> tuple[bool, str | None]:
+        libs = _x11_libraries()
+        if libs is None:
+            return False, "X11 libraries are not available."
+        xlib, xtst = libs
+        display = xlib.XOpenDisplay(None)
+        if not display:
+            return False, "Could not open the X display."
+        try:
+            major = ctypes.c_int()
+            minor = ctypes.c_int()
+            event = ctypes.c_int()
+            error = ctypes.c_int()
+            if not xtst.XTestQueryExtension(
+                display,
+                ctypes.byref(event),
+                ctypes.byref(error),
+                ctypes.byref(major),
+                ctypes.byref(minor),
+            ):
+                return False, "This X server does not offer the XTEST extension."
+
+            control = xlib.XKeysymToKeycode(display, xlib.XStringToKeysym(b"Control_L"))
+            v = xlib.XKeysymToKeycode(display, xlib.XStringToKeysym(b"v"))
+            if not control or not v:
+                return False, "Could not map Ctrl+V on this keyboard layout."
+
+            for keycode, press in ((control, 1), (v, 1), (v, 0), (control, 0)):
+                xtst.XTestFakeKeyEvent(display, keycode, press, 0)
+            xlib.XFlush(display)
+        finally:
+            xlib.XCloseDisplay(display)
+        return True, None
+
+    def describe(self) -> str:
+        return "Pastes by sending Ctrl+V to the focused window, using X11's XTEST extension."
+
+
+def _x11_libraries():
+    """(libX11, libXtst) with their signatures bound, or None if either is missing.
+
+    Bound rather than left to ctypes' defaults because `XOpenDisplay` returns a pointer:
+    the default int return truncates it on 64-bit, which fails in ways that look like the
+    display being unavailable.
+    """
+    import ctypes.util
+
+    x11_path = ctypes.util.find_library("X11")
+    xtst_path = ctypes.util.find_library("Xtst")
+    if not x11_path or not xtst_path:
+        return None
+    try:
+        xlib = ctypes.CDLL(x11_path)
+        xtst = ctypes.CDLL(xtst_path)
+    except OSError:
+        return None
+
+    xlib.XOpenDisplay.restype = ctypes.c_void_p
+    xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    xlib.XFlush.argtypes = [ctypes.c_void_p]
+    xlib.XStringToKeysym.restype = ctypes.c_ulong
+    xlib.XStringToKeysym.argtypes = [ctypes.c_char_p]
+    xlib.XKeysymToKeycode.restype = ctypes.c_ubyte
+    xlib.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    xtst.XTestFakeKeyEvent.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_int,
+        ctypes.c_ulong,
+    ]
+    xtst.XTestQueryExtension.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(ctypes.c_int)] * 4
+    return xlib, xtst
+
+
 class YdotoolPasteBackend:
     name = "ydotool"
 
@@ -209,16 +310,27 @@ class NoPasteBackend:
     def describe(self) -> str:
         if sys.platform == "win32":
             return "Automatic pasting is unavailable."
+        if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland":
+            return (
+                "Wayland deliberately does not let one application press keys in another, "
+                "so there is no equivalent of the X11 route yada uses elsewhere. Text is "
+                "copied to the clipboard and you paste it with Ctrl+V.\n\n"
+                "To enable automatic pasting:\n" + YDOTOOL_INSTALL_HINT
+            )
         return (
-            "Wayland does not let applications press keys for you, so text is copied to "
-            "the clipboard and you paste it with Ctrl+V.\n\n"
+            "No way to send a keystroke was found in this session, so text is copied to "
+            "the clipboard and you paste it with Ctrl+V. On X11 yada uses the XTEST "
+            "extension, which needs nothing installed; this session appears to have "
+            "neither an X display nor ydotool.\n\n"
             "To enable automatic pasting:\n" + YDOTOOL_INSTALL_HINT
         )
 
 
 def create_paste_backend() -> PasteBackend:
     """Best available backend. Never returns None; NoPasteBackend is the honest floor."""
-    for backend in (Win32PasteBackend, YdotoolPasteBackend):
+    # X11 before ydotool: XTEST needs nothing installed, so preferring it means an X11
+    # user is never told to set up a daemon they do not need.
+    for backend in (Win32PasteBackend, X11PasteBackend, YdotoolPasteBackend):
         if backend.available():
             return backend()
     return NoPasteBackend()

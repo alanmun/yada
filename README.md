@@ -2,45 +2,41 @@
 
 *Yet Another Dictating App.*
 
-Press a shortcut, speak, get text. Optionally have an LLM clean it up first. Lives in the
-system tray on Windows 11 and KDE Plasma.
+Press a shortcut, speak, get text. Optionally use transformations to have an LLM clean it up first. 
+
+For Windows and Linux: Lives in the system tray on Windows 11 and KDE Plasma.
 
 ```
 Ctrl+Shift+;  ──▶  🔴 recording  ──▶  Ctrl+Shift+;  ──▶  ♪ transcript  ──▶  ♪ cleaned up
                     (streaming as you speak)              chime 1              chime 2
 ```
 
-## Why this exists
-
-Dictation tools rot. The models they name in their source go out of date, the provider
-renames its recommended model, and a year later you are paying for last year's accuracy
-through an app nobody has updated. yada is built around avoiding exactly that.
-
-- **Models are discovered at runtime, never hardcoded.** Set the model to *Automatic* and it
-  follows whatever the provider currently recommends. New models are usable the day they
-  ship, without an update to yada.
-- **Capabilities are discovered too.** Where a provider publishes what a model supports, yada
-  reads it. Where it does not, yada measures it with a single cheap request and remembers the
-  answer.
-- **Providers are pluggable.** OpenAI and OpenRouter today. Adding ElevenLabs, Groq, Grok or a
-  local Whisper is one file and a registry entry, with no changes to the recording pipeline.
-
 ## Features
 
-- **Global shortcut** — press once to start, once to stop. Works from anywhere.
-- **Live transcription** — with OpenAI, audio streams while you speak, so the text is ready
-  the instant you stop. Providers without a live connection transcribe after you stop.
-- **Two-stage pipeline** — transcription, then an optional LLM cleanup pass. Three distinct
-  chimes — one when yada starts listening, one when the transcript lands, one when the
-  cleanup finishes — so you always know where you are without looking.
-- **A vocabulary that actually works** — your names and jargon are sent as *literal vocabulary
+- **One shortcut that works anywhere**: press once to start, once to stop, and your spoken word is turned into text. 
+  Sounds play when starting your transcription and when its ready to paste.
+- **Live transcription**: with OpenAI, audio streams while you speak, so the text is ready the instant you stop. Providers without a live connection transcribe after you stop.
+- **Transformations**: After each transcribe completes, you can run optional LLM cleanup passes or find and replace operations. A third chime
+- **A vocabulary that actually works**: your names and jargon are sent as *literal vocabulary
   hints* to the transcription model, fixing spelling while it is still listening rather than
   patching it afterwards.
-- **Opt-in pasting** — off by default. Choose to paste after transcription or after cleanup.
-- **Silent auto-update** — new versions download and unpack in the background; the next
+- **Opt-in pasting**: off by default. Choose to paste after transcription or after cleanup.
+- **Silent auto-update**: new versions download and unpack in the background; the next
   launch is already the new one. Signature-verified, with automatic rollback.
-- **Nothing is lost** — every recording is buffered locally, so a dropped connection costs a
+- **Nothing is lost**: every recording is buffered locally, so a dropped connection costs a
   second, not your words. A failed cleanup pass still gives you the transcript.
+
+## Why this exists
+
+I really enjoyed using [Whispering](https://github.com/epicenter-md/epicenter), but the app like many apps went stale and stopped receiving updates. In the age of AI I figured I'd just make my own, exactly the way I like it. I'll speak to my design preferences/quality goals here:
+
+- **No more getting stuck on last year's models**: Models are discovered at runtime whenever possible. Set the model to *Automatic* and it follows whatever the provider currently recommends. New models are usable the day they ship, without an update to yada. 
+  - **Capabilities are discovered too.** Where a provider publishes what a model supports, yada reads it. Where it does not, yada measures it with a single cheap request and remembers the answer.
+- **Providers are pluggable.** OpenAI and OpenRouter are supported today, future integrations should be easily extensible without rewriting 6 python files.
+- **Privacy**: Local models are supported, and you can upload custom ones and configure them yourself, so you're not forced to use only what an app officially supports.
+- **Low RAM util**: A speech to text app shouldn't be a memory hog.
+  - (This doesn't count RAM used to load models locally!)
+
 
 ## Install
 
@@ -70,17 +66,16 @@ keys, and names the fix for anything missing.
 
 ## The Wayland situation
 
-Worth knowing up front, because it affects two features and is not yada's doing: a Wayland
-client is not permitted to grab keyboard shortcuts or to press keys on your behalf. Both are
-security properties of the protocol.
+Wayland client is not permitted to grab keyboard shortcuts or to press keys on your behalf because both of those things are security properties of the protocol.
 
-**The shortcut.** yada asks the compositor to own it, via the XDG `GlobalShortcuts` portal.
-KDE Plasma supports this well — you approve a dialog once. If that is unavailable, bind this
-command in *System Settings → Shortcuts* instead, and it will reach yada just as fast:
+yada asks the compositor to own the shortcut via the XDG `GlobalShortcuts` portal.
+KDE Plasma supports this well where you just need to approve a dialog once. 
 
-```
-~/.local/share/yada/yada toggle
-```
+
+> If that is unavailable, bind this command in *System Settings → Shortcuts* instead, and it will reach yada just as fast:
+> ```
+> ~/.local/share/yada/yada toggle
+> ```
 
 **Auto-paste.** Text is always copied to your clipboard, which needs no special permission.
 Pressing Ctrl+V for you requires [`ydotool`](https://github.com/ReimuNotMoe/ydotool):
@@ -134,14 +129,9 @@ git tag v0.2.0 && git push --tags           # CI builds, signs and publishes
 Installed copies pick the release up in the background within a few hours and use it at next
 launch.
 
-## Non-goals
-
-Kept out deliberately, so this stays maintainable by one person: macOS, mobile, a browser
-extension, sync, telemetry, speaker diarisation, and real-time translation.
-
 ## Prior art
 
-yada exists because [Whispering](https://github.com/epicenter-md/epicenter) got the shape
+yada exists because  got the shape
 right and then stopped being updated. The two-stage transcribe-then-transform pipeline and
 the ordered-steps model for transformations are its ideas, and they are good ones.
 
