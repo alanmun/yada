@@ -24,7 +24,7 @@ import os
 import secrets
 import shutil
 
-from .base import Combo, TriggerCallback
+from .base import HOLD_SECONDS, Combo, TriggerCallback
 
 PORTAL_BUS = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
@@ -63,6 +63,9 @@ class KdePortalHotkeyBackend:
         self._shortcuts = None
         self._session_handle: str | None = None
         self._on_trigger: TriggerCallback | None = None
+        self._on_hold: TriggerCallback | None = None
+        # Set while the shortcut is down, cancelled if it comes up in time.
+        self._hold_timer: asyncio.TimerHandle | None = None
         self._combo: Combo | None = None
         self._error: str | None = None
         self._bound = False
@@ -85,9 +88,15 @@ class KdePortalHotkeyBackend:
 
     # -- lifecycle ----------------------------------------------------------------------
 
-    def start(self, combo: Combo, on_trigger: TriggerCallback) -> None:
+    def start(
+        self,
+        combo: Combo,
+        on_trigger: TriggerCallback,
+        on_hold: TriggerCallback | None = None,
+    ) -> None:
         self._combo = combo
         self._on_trigger = on_trigger
+        self._on_hold = on_hold
         self._error = None
         self._bound = False
         # Scheduled rather than awaited: start() must not block the UI while the user
@@ -167,6 +176,9 @@ class KdePortalHotkeyBackend:
 
         # Activated arrives every time the user presses the combo.
         self._shortcuts.on_activated(self._on_activated)
+        # Deactivated is what makes a held shortcut distinguishable here.
+        with contextlib.suppress(Exception):
+            self._shortcuts.on_deactivated(self._on_deactivated)
 
         try:
             await self._bind(Variant)
@@ -254,10 +266,39 @@ class KdePortalHotkeyBackend:
         return asyncio.ensure_future(wait())
 
     def _on_activated(self, session_handle, shortcut_id, _timestamp, _options) -> None:
+        """The shortcut went down. Whether it is a tap or a hold is not known yet.
+
+        Unlike Win32's RegisterHotKey, the portal also reports the release -- so the
+        decision is made by whichever arrives first: Deactivated, or the timer.
+        """
         if shortcut_id != SHORTCUT_ID or session_handle != self._session_handle:
             return
+        if self._on_hold is None:
+            if self._on_trigger is not None:
+                self._on_trigger()
+            return
+        self._cancel_hold_timer()
+        self._hold_timer = self._loop.call_later(HOLD_SECONDS, self._fire_hold)
+
+    def _on_deactivated(self, session_handle, shortcut_id, _timestamp, _options) -> None:
+        """Released. If the hold timer has not fired yet, this was an ordinary press."""
+        if shortcut_id != SHORTCUT_ID or session_handle != self._session_handle:
+            return
+        if self._hold_timer is None:
+            return  # the hold already fired, and consumed this press
+        self._cancel_hold_timer()
         if self._on_trigger is not None:
             self._on_trigger()
+
+    def _fire_hold(self) -> None:
+        self._hold_timer = None
+        if self._on_hold is not None:
+            self._on_hold()
+
+    def _cancel_hold_timer(self) -> None:
+        timer, self._hold_timer = self._hold_timer, None
+        if timer is not None:
+            timer.cancel()
 
     async def _teardown(self) -> None:
         bus, self._bus = self._bus, None

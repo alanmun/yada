@@ -168,7 +168,7 @@ def fake_audio(monkeypatch):
     return FakeCapture
 
 
-def build(settings=None, transcriber=None, transformer=None):
+def build(settings=None, transcriber=None, transformer=None, recordings=None):
     settings = settings or Settings()
     rec = Recorder()
     deps = SessionDeps(
@@ -182,6 +182,7 @@ def build(settings=None, transcriber=None, transformer=None):
         events=rec,
         chime=rec.chimes.append,
         deliver=lambda text, stage: rec.delivered.append((text, stage)),
+        recordings=recordings,
     )
     return DictationSession(asyncio.get_event_loop(), deps), rec, settings
 
@@ -600,3 +601,126 @@ async def test_a_failure_while_delivering_does_not_wedge_the_session(fake_audio)
     # And it can be used again immediately.
     await sess.toggle_async()
     assert sess.state is SessionState.RECORDING
+
+
+# --------------------------------------------------------------------------------------
+# Keeping the recording, so a failed transcription is not a lost dictation
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def store(tmp_path):
+    from yada.pipeline.recordings import RecordingStore
+
+    return RecordingStore(directory=tmp_path / "recordings", keep=5)
+
+
+async def test_a_successful_dictation_is_kept(fake_audio, store):
+    stt = FakeTranscriber(batch_text="hello there")
+    sess, _rec, _ = build(transcriber=stt, recordings=store)
+    await sess.toggle_async()
+    await sess.toggle_async()
+
+    entries = store.entries()
+    assert len(entries) == 1
+    assert entries[0].transcript == "hello there"
+    assert entries[0].succeeded is True
+    assert store.read_audio(entries[0].id), "the audio has to be there to retry"
+
+
+async def test_a_failed_transcription_still_keeps_the_audio(fake_audio, store):
+    """The whole point. The recording was complete; only the request failed."""
+    stt = FakeTranscriber(batch_fails="connection reset")
+    sess, rec, _ = build(transcriber=stt, recordings=store)
+    await sess.toggle_async()
+    await sess.toggle_async()
+
+    assert rec.errors, "the user is still told it failed"
+    entries = store.entries()
+    assert len(entries) == 1
+    assert entries[0].transcript == ""
+    assert "connection reset" in entries[0].error
+    assert store.read_audio(entries[0].id), "and the audio survives for a retry"
+
+
+async def test_keeping_none_stores_nothing(fake_audio, tmp_path):
+    from yada.pipeline.recordings import RecordingStore
+
+    off = RecordingStore(directory=tmp_path / "recordings", keep=0)
+    sess, _rec, _ = build(transcriber=FakeTranscriber(), recordings=off)
+    await sess.toggle_async()
+    await sess.toggle_async()
+    assert off.entries() == [], "0 must mean no audio is written at all"
+
+
+async def test_retry_transcribes_the_last_recording_again(fake_audio, store):
+    """A network error the first time, and the retry succeeds without speaking again."""
+    stt = FakeTranscriber(batch_fails="network unreachable")
+    sess, rec, settings = build(transcriber=stt, recordings=store)
+    settings.output.paste_mode = "after_transcription"
+    await sess.toggle_async()
+    await sess.toggle_async()
+    assert store.entries()[0].transcript == ""
+
+    # The network comes back.
+    working = FakeTranscriber(batch_text="what I said earlier")
+    sess._deps = type(sess._deps)(
+        settings=sess._deps.settings,
+        transcriber=lambda: (working, TranscribeOptions(model="m")),
+        transformer=sess._deps.transformer,
+        events=rec,
+        chime=rec.chimes.append,
+        deliver=lambda text, stage: rec.delivered.append((text, stage)),
+        recordings=store,
+    )
+
+    text = await sess.retry_last()
+    assert text == "what I said earlier"
+    assert working.batch_calls == 1
+    assert working.last_wav, "it must send the stored audio, not a fresh recording"
+    assert store.entries()[0].transcript == "what I said earlier", "the outcome is updated"
+    assert rec.delivered[-1][0] == "what I said earlier"
+    assert Stage.TRANSCRIPTION in rec.chimes
+    assert sess.state is SessionState.IDLE
+
+
+async def test_retry_does_not_record_anything_new(fake_audio, store):
+    """Holding the shortcut must not start listening -- that is the point of holding it."""
+    stt = FakeTranscriber(batch_text="first")
+    sess, _rec, _ = build(transcriber=stt, recordings=store)
+    await sess.toggle_async()
+    await sess.toggle_async()
+    before = len(fake_audio.instances)
+
+    await sess.retry_last()
+    assert len(fake_audio.instances) == before, "no microphone should be opened"
+    assert len(store.entries()) == 1, "and no second recording should appear"
+
+
+async def test_retry_with_nothing_recorded_says_so(fake_audio, store):
+    sess, rec, _ = build(transcriber=FakeTranscriber(), recordings=store)
+    assert await sess.retry_last() == ""
+    assert any("no recent recording" in e for e in rec.errors)
+
+
+async def test_retry_is_refused_while_recording(fake_audio, store):
+    sess, rec, _ = build(transcriber=FakeTranscriber(), recordings=store)
+    await sess.toggle_async()
+    assert sess.state is SessionState.RECORDING
+
+    assert await sess.retry_last() == ""
+    assert any("Still finishing" in w for w in rec.warnings)
+    assert sess.state is SessionState.RECORDING, "and the recording is undisturbed"
+
+
+async def test_a_failing_retry_leaves_the_recording_alone(fake_audio, store):
+    """So it can be retried again, rather than being marked off after one more failure."""
+    stt = FakeTranscriber(batch_fails="still down")
+    sess, rec, _ = build(transcriber=stt, recordings=store)
+    await sess.toggle_async()
+    await sess.toggle_async()
+
+    assert await sess.retry_last() == ""
+    assert any("Retry failed" in e for e in rec.errors)
+    assert store.read_audio(store.entries()[0].id), "the audio is still there to try again"
+    assert sess.state is SessionState.IDLE

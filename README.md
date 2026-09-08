@@ -115,6 +115,23 @@ sudo usermod -aG input $USER   # then log out and back in
 With none of those, auto-paste is unavailable and yada says so in Settings rather than
 failing quietly at paste time.
 
+## When a transcription fails
+
+Transcription runs after you stop talking, so a dropped connection at that moment used to
+lose everything you had just said. It does not any more:
+
+**Hold the dictation shortcut for three seconds** and yada transcribes your most recent
+recording again instead of listening afresh. No window to open, nothing to dig out. On
+Wayland, where a desktop-bound shortcut cannot tell a tap from a hold, bind `yada retry` to
+a second shortcut instead.
+
+The **Recordings** tab keeps your last few recordings, with a play button and a scrubber so
+you can hear what you said, a button to transcribe each one again, and a button to delete
+them. Transcribing from that tab copies the result to your clipboard.
+
+These are audio files of your dictation kept on your own machine. How many to keep is on the
+System tab; `0` keeps none and deletes any already there.
+
 ## Configuration
 
 | What | Where |

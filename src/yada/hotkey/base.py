@@ -16,6 +16,11 @@ from typing import Protocol, runtime_checkable
 
 TriggerCallback = Callable[[], None]
 
+# How long the shortcut must be held to mean "retry the last recording" rather than
+# "start or stop dictating". Three seconds is long enough that nobody reaches it by
+# accident and short enough to hold deliberately.
+HOLD_SECONDS = 3.0
+
 _MOD_ALIASES = {
     "ctrl": "ctrl",
     "control": "ctrl",
@@ -135,6 +140,25 @@ class Combo:
         mod |= 0x4000
         return mod, self._vk()
 
+    def win32_hold_keys(self) -> tuple[tuple[int, ...], ...]:
+        """Virtual-key groups to poll with GetAsyncKeyState, for detecting a held combo.
+
+        Groups rather than a flat list because a modifier can be satisfied by either side
+        of the keyboard. Ctrl, Shift and Alt each have a combined virtual key that covers
+        both; the Windows key does not, so it needs its two listed together.
+        """
+        groups: list[tuple[int, ...]] = []
+        if self.ctrl:
+            groups.append((0x11,))  # VK_CONTROL, either side
+        if self.shift:
+            groups.append((0x10,))  # VK_SHIFT
+        if self.alt:
+            groups.append((0x12,))  # VK_MENU
+        if self.meta:
+            groups.append((0x5B, 0x5C))  # VK_LWIN, VK_RWIN
+        groups.append((self._vk(),))
+        return tuple(groups)
+
     def _vk(self) -> int:
         if entry := _KEY_TABLE.get(self.key):
             return entry[0]
@@ -190,7 +214,19 @@ class HotkeyBackend(Protocol):
         """Whether this backend can work in the current session."""
         ...
 
-    def start(self, combo: Combo, on_trigger: TriggerCallback) -> None: ...
+    def start(
+        self,
+        combo: Combo,
+        on_trigger: TriggerCallback,
+        on_hold: TriggerCallback | None = None,
+    ) -> None:
+        """`on_hold` fires instead of `on_trigger` when the combo is held.
+
+        Optional because not every backend can tell: the desktop-bound command backend
+        only ever learns that the shortcut fired, never for how long. A backend that
+        cannot detect a hold simply never calls it, and `yada retry` covers that case.
+        """
+        ...
 
     def stop(self) -> None: ...
 

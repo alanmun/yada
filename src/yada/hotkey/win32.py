@@ -16,7 +16,7 @@ import ctypes
 import threading
 from ctypes import wintypes
 
-from .base import Combo, TriggerCallback
+from .base import HOLD_SECONDS, Combo, TriggerCallback
 
 HOTKEY_ID = 1
 WM_HOTKEY = 0x0312
@@ -54,6 +54,7 @@ class Win32HotkeyBackend:
         self._error: str | None = None
         self._combo: Combo | None = None
         self._on_trigger: TriggerCallback | None = None
+        self._on_hold: TriggerCallback | None = None
 
     @staticmethod
     def available() -> bool:
@@ -61,9 +62,15 @@ class Win32HotkeyBackend:
 
         return sys.platform == "win32"
 
-    def start(self, combo: Combo, on_trigger: TriggerCallback) -> None:
+    def start(
+        self,
+        combo: Combo,
+        on_trigger: TriggerCallback,
+        on_hold: TriggerCallback | None = None,
+    ) -> None:
         self._combo = combo
         self._on_trigger = on_trigger
+        self._on_hold = on_hold
         self._error = None
         self._stop.clear()
         self._ready.clear()
@@ -135,6 +142,39 @@ class Win32HotkeyBackend:
                 if result in (0, -1):  # WM_QUIT, or an error
                     break
                 if msg.message == WM_HOTKEY and self._on_trigger is not None:
-                    self._on_trigger()
+                    if self._on_hold is not None and self._wait_for_hold(user32):
+                        self._on_hold()
+                    else:
+                        self._on_trigger()
         finally:
             user32.UnregisterHotKey(None, HOTKEY_ID)
+
+    def _wait_for_hold(self, user32) -> bool:
+        """True if the combo is still held after HOLD_SECONDS.
+
+        RegisterHotKey reports presses and never releases, so a hold can only be found by
+        asking the keyboard. GetAsyncKeyState is polled until either a key comes up -- an
+        ordinary tap, which is the common case and costs only the length of the press --
+        or the threshold is reached.
+
+        Waiting for the release rather than acting immediately is the deliberate choice.
+        Dispatching on press and then converting to a retry at three seconds would start a
+        recording and sound the listening chime before abandoning both, and the user asked
+        for a hold to mean "do not listen fresh". A tap of 100ms costs 100ms; the thing
+        this app was rescued from was three thousand.
+        """
+        import time
+
+        assert self._combo is not None
+        groups = self._combo.win32_hold_keys()
+        deadline = time.monotonic() + HOLD_SECONDS
+        while time.monotonic() < deadline:
+            held = all(
+                any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in group) for group in groups
+            )
+            if not held:
+                return False  # released: an ordinary press
+            if self._stop.is_set():
+                return False
+            time.sleep(0.02)
+        return True

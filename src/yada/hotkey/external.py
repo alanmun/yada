@@ -37,9 +37,18 @@ class ExternalHotkeyBackend:
         # Always: it requires nothing of the session, because the trigger arrives over IPC.
         return True
 
-    def start(self, combo: Combo, on_trigger: TriggerCallback) -> None:
+    def start(
+        self,
+        combo: Combo,
+        on_trigger: TriggerCallback,
+        on_hold: TriggerCallback | None = None,
+    ) -> None:
         # Nothing to register. Triggers arrive via the IPC "toggle" command, which the app
         # wires straight to the same handler.
+        #
+        # `on_hold` is accepted and ignored: a desktop-bound command only reports that the
+        # shortcut fired, never for how long, so there is nothing here that could tell a
+        # tap from a hold. `yada retry` is the equivalent, bound to a second shortcut.
         self._combo = combo
 
     def stop(self) -> None:

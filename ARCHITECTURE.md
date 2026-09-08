@@ -297,6 +297,42 @@ PortAudio is warmed on a background thread at launch for the same reason: `impor
 sounddevice` initialises it and enumerating devices walks every endpoint the host offers,
 which is not free on Windows and was otherwise paid on the first keypress.
 
+## Recordings, and retrying instead of repeating
+
+Transcription happens *after* you stop talking, so a network error at that moment threw
+away a recording that was complete, correct, and already paid for in the user's time. The
+audio existed; only the request had failed.
+
+So every recording is written to `<cache>/recordings/` with the outcome of its
+transcription, and the last few are kept. A failure becomes something to retry.
+
+* **The index is a convenience, not the data.** `index.json` holds the transcripts and
+  errors, but the `.wav` files are the truth: losing or corrupting the index rebuilds what
+  it can from the audio rather than losing recordings the user may be about to retry.
+* **Ordering is on `(recorded_at, id)` with microsecond timestamps.** Second resolution was
+  not enough — five recordings inside one second compared equal, so the order was arbitrary
+  and pruning deleted whichever it happened to see last, including the newest. Which is
+  exactly the one the retry shortcut reaches for.
+* **A hard cap of 20 regardless of the setting**, because this is audio of everything
+  dictated sitting on a disk. `0` keeps none and deletes what is there.
+
+### Holding the shortcut, and why each backend differs
+
+Holding the shortcut retries the newest recording instead of listening afresh. What it takes
+to detect that is different on each platform, and the differences are not incidental:
+
+* **win32** — `RegisterHotKey` reports presses and never releases, so the only way to know
+  is to ask the keyboard: `GetAsyncKeyState` is polled until a key comes up or the threshold
+  passes. Waiting for the release rather than acting immediately is deliberate. Dispatching
+  on press and converting to a retry at three seconds would start a recording and sound the
+  listening chime before abandoning both, and a hold is supposed to mean "do not listen
+  fresh". A 100ms tap costs 100ms; the delay this app was rescued from was three thousand.
+* **kde_portal** — the portal reports `Deactivated` as well as `Activated`, so a timer is
+  armed on press and cancelled by the release. Whichever arrives first decides.
+* **external** — a desktop-bound command reports that the shortcut fired and nothing else,
+  so there is nothing to measure. `yada retry` exists for that case, bound to a second
+  shortcut.
+
 ## Chimes
 
 Two distinct sounds — one when transcription completes, one when transformation completes — via

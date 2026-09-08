@@ -140,6 +140,10 @@ class OutputSettings:
     # The live transcript panel. On by default: without it "transcribe while I speak" has
     # no visible effect at all, which is indistinguishable from streaming not working.
     show_overlay: bool = True
+    # Recordings retained so a failed transcription can be retried rather than repeated.
+    # This is audio of everything dictated, held on disk, so it is capped and can be
+    # turned off entirely with 0. See pipeline/recordings.py.
+    keep_recordings: int = 5
 
 
 @dataclass(slots=True)

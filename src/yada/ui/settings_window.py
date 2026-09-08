@@ -12,6 +12,7 @@ behaviour Whispering gets wrong on Windows.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import sys
 
@@ -28,8 +29,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QStackedWidget,
     QTabWidget,
     QVBoxLayout,
@@ -46,6 +49,7 @@ from ..providers.base import ReasoningEffort, ServiceTier, Support
 from ..providers.registry import PLANNED, SPECS
 from .languages import label_for as language_label
 from .languages import sorted_codes
+from .recordings_tab import RecordingsPane
 from .sound_picker import ChimeRow, SoundLibraryEditor, VolumeRow
 from .steps_editor import StepsEditor
 from .theme import TEXT_SCALE_LABELS, TEXT_SCALES, THEME_LABELS, THEMES
@@ -159,6 +163,13 @@ class SettingsWindow(QWidget):
     # the OS keyring, they are laborious to replace, and nobody asking to tidy up
     # their preferences means "and log me out of my provider".
     reset_requested = Signal()
+    # The Recordings tab, re-exposed so the app owns the store and this window owns none
+    # of it. `recording_transcribe_requested` copies to the clipboard rather than pasting:
+    # pasting from a button in this window would paste into this window.
+    recording_transcribe_requested = Signal(str)
+    recording_delete_requested = Signal(str)
+    recordings_clear_requested = Signal()
+    recordings_refresh_requested = Signal()
 
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -197,6 +208,7 @@ class SettingsWindow(QWidget):
         self.tabs.addTab(_scrollable(self._build_transcription()), "Transcribe")
         self.tabs.addTab(_scrollable(self._build_transform()), "Transform")
         self.tabs.addTab(_scrollable(self._build_vocabulary()), "Vocabulary")
+        self.tabs.addTab(_scrollable(self._build_recordings()), "Recordings")
         self.tabs.addTab(_scrollable(self._build_shortcut()), "Shortcut")
         self.tabs.addTab(_scrollable(self._build_audio_output()), "System")
         self.tabs.addTab(_scrollable(self._build_updates()), "Updates")
@@ -554,6 +566,11 @@ class SettingsWindow(QWidget):
         self.tf_model.changed.connect(lambda _: self.refresh_models_requested.emit("capabilities"))
 
         row = QHBoxLayout()
+        # Zero margins on every row wrapped in a QWidget. A QWidget applies its own layout
+        # margins, so a row built this way is indented while a plain checkbox added
+        # straight to the column is flush against the edge -- which is why the priority
+        # tick box and the reasoning row did not line up with each other.
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(labelled("Provider", self.tf_provider), 1)
         row.addWidget(labelled("Model", self.tf_model), 2)
         holder = QWidget()
@@ -567,6 +584,7 @@ class SettingsWindow(QWidget):
         self.tf_reasoning_box.toggled.connect(self._on_reasoning_toggled)
         self.tf_reasoning = QComboBox()
         reasoning_row = QHBoxLayout()
+        reasoning_row.setContentsMargins(0, 0, 0, 0)
         reasoning_row.addWidget(self.tf_reasoning_box)
         reasoning_row.addWidget(self.tf_reasoning, 1)
         reasoning_holder = QWidget()
@@ -575,6 +593,19 @@ class SettingsWindow(QWidget):
 
         self.steps = StepsEditor()
         body.addWidget(labelled("Cleanup steps", self.steps), 1)
+
+        self.prompt_preview = QPlainTextEdit()
+        self.prompt_preview.setReadOnly(True)
+        self.prompt_preview.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.prompt_preview.setMinimumHeight(round(self.fontMetrics().height() * 9))
+        body.addWidget(labelled("Exactly what gets sent", self.prompt_preview))
+        body.addWidget(
+            hint(
+                "Built from the steps and vocabulary above by the same code that builds the "
+                "real request, so it cannot drift from what is actually sent. It updates as "
+                "you type."
+            )
+        )
 
         reset = QPushButton("Reset to a single default cleanup step")
         reset.clicked.connect(lambda: self.steps.set_steps(default_steps()))
@@ -587,6 +618,69 @@ class SettingsWindow(QWidget):
         self.tf_body.setEnabled(on)
         if on and not self.steps.steps():
             self.steps.set_steps(default_steps())
+
+    PREVIEW_SPEECH = "Your dictated speech would show up right here, but this is just a preview."
+
+    def _refresh_prompt_preview(self) -> None:
+        """Show the exact prompts the next dictation would send.
+
+        Built with `build_system_prompt` and `build_user_prompt` -- the same functions the
+        pipeline calls -- so the preview cannot claim one thing while the request says
+        another. Read from the widgets rather than from saved settings, so it tracks edits
+        as they are made instead of lagging a save behind.
+        """
+        from ..config import Vocabulary
+        from ..pipeline.transform import build_system_prompt, build_user_prompt
+
+        try:
+            steps = self.steps.steps()
+            vocab = Vocabulary(
+                terms=self.vocab_terms.values(),
+                context_prompt=self.vocab_context.toPlainText().strip(),
+                languages=self.vocab_languages.checked_values(),
+            )
+        except Exception:  # noqa: BLE001 - a preview must never break the window
+            return
+
+        enabled = [step for step in steps if step.enabled]
+        if not self.tf_enabled.isChecked():
+            self.prompt_preview.setPlainText(
+                "Transforms are off, so the transcript is used exactly as it comes back "
+                "from transcription and no prompt is sent."
+            )
+            return
+        if not enabled:
+            self.prompt_preview.setPlainText(
+                "No enabled steps, so nothing is sent and the transcript is used as-is."
+            )
+            return
+
+        text = self.PREVIEW_SPEECH
+        blocks: list[str] = []
+        for index, step in enumerate(enabled, start=1):
+            if step.type == "find_replace":
+                target = step.find or "(nothing set)"
+                blocks.append(
+                    f"── Step {index}: find and replace ──\n"
+                    f"Runs on this machine, nothing is sent to a model.\n"
+                    f"Replaces {target!r} with {step.replace!r}"
+                    + ("  (as a regular expression)" if step.use_regex else "")
+                )
+                # Its output feeds the next step, and it is cheap to show truthfully.
+                from ..pipeline.transform import apply_find_replace
+
+                text, _error = apply_find_replace(step, text)
+                continue
+
+            blocks.append(
+                f"── Step {index}: sent to {self.tf_model.current_model() or 'the model'} ──\n"
+                f"\nSYSTEM:\n{build_system_prompt(step, vocab)}"
+                f"\n\nUSER:\n{build_user_prompt(step, text)}"
+            )
+            if index < len(enabled):
+                text = f"(whatever step {index} returns)"
+
+        self.prompt_preview.setPlainText("\n\n".join(blocks))
 
     def _on_reasoning_toggled(self, on: bool) -> None:
         self.tf_reasoning.setEnabled(on and self.tf_reasoning_box.isEnabled())
@@ -632,6 +726,20 @@ class SettingsWindow(QWidget):
             self.mic_test.setChecked(False)  # toggled() releases the device
         if reason:
             self.mic_test_note.setText(reason)
+
+    def _build_recordings(self) -> QWidget:
+        self.recordings_pane = RecordingsPane()
+        self.recordings_pane.transcribe_requested.connect(self.recording_transcribe_requested.emit)
+        self.recordings_pane.delete_requested.connect(self.recording_delete_requested.emit)
+        self.recordings_pane.clear_requested.connect(self.recordings_clear_requested.emit)
+        self.recordings_pane.refresh_requested.connect(self.recordings_refresh_requested.emit)
+        return self.recordings_pane
+
+    def set_recordings(self, recordings, audio_for) -> None:
+        self.recordings_pane.set_recordings(recordings, audio_for)
+
+    def set_recordings_status(self, text: str) -> None:
+        self.recordings_pane.set_status(text)
 
     def set_transcription_capabilities(self, *, delay: Support) -> None:
         """Disable the speed dial for models that refuse it.
@@ -913,6 +1021,23 @@ class SettingsWindow(QWidget):
                 "straight through it."
             )
         )
+        self.keep_recordings = QSpinBox()
+        self.keep_recordings.setRange(0, 20)
+        notice_layout.addWidget(
+            labelled(
+                "Recordings to keep",
+                self.keep_recordings,
+                tip="0 keeps none, and deletes any already stored.",
+            )
+        )
+        notice_layout.addWidget(
+            hint(
+                "Audio of your recent dictations, kept on this machine so a transcription "
+                "that fails can be retried instead of repeated. They appear on the "
+                "Recordings tab, where you can play them, transcribe them again, or delete "
+                "them."
+            )
+        )
         self.show_notifications = QCheckBox("Show desktop notifications for problems")
         notice_layout.addWidget(self.show_notifications)
         notice_layout.addWidget(
@@ -1133,6 +1258,7 @@ class SettingsWindow(QWidget):
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
         self.show_notifications.setChecked(s.output.show_notifications)
         self.show_overlay.setChecked(s.output.show_overlay)
+        self.keep_recordings.setValue(s.output.keep_recordings)
         self.chime_listening.set_enabled_state(s.output.chime_on_listening)
         self.chime_transcription.set_enabled_state(s.output.chime_on_transcription)
         self.chime_transformation.set_enabled_state(s.output.chime_on_transformation)
@@ -1145,6 +1271,10 @@ class SettingsWindow(QWidget):
         self.sound_library.refresh()
 
         self.refresh_key_status()
+        # Explicitly at the end of a load: widgets are set in order, so a refresh triggered
+        # by an early one would render a half-loaded state.
+        with contextlib.suppress(Exception):
+            self._refresh_prompt_preview()
 
     def collect(self) -> Settings:
         s = dataclasses.replace(self._settings)
@@ -1211,6 +1341,7 @@ class SettingsWindow(QWidget):
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
         s.output.show_notifications = self.show_notifications.isChecked()
         s.output.show_overlay = self.show_overlay.isChecked()
+        s.output.keep_recordings = int(self.keep_recordings.value())
         s.output.chime_on_listening = self.chime_listening.is_enabled()
         s.output.chime_on_transcription = self.chime_transcription.is_enabled()
         s.output.chime_on_transformation = self.chime_transformation.is_enabled()
@@ -1320,6 +1451,10 @@ class SettingsWindow(QWidget):
                 child.valueChanged.connect(self._schedule_save)
 
     def _schedule_save(self, *_args) -> None:
+        # Ahead of the _loading guard: the preview should follow a load as well as an edit,
+        # and it writes nothing, so there is no reason to debounce it.
+        with contextlib.suppress(Exception):
+            self._refresh_prompt_preview()
         if self._loading:
             return
         self._save_timer.start()
@@ -1354,8 +1489,10 @@ class SettingsWindow(QWidget):
         # debounce simply because the window was closed promptly.
         self.flush_pending_save()
         self.flush_pending_keys()
-        # Never leave the microphone open behind a closed window.
+        # Never leave the microphone open behind a closed window, or a recording playing.
         self.stop_mic_test()
+        with contextlib.suppress(Exception):
+            self.recordings_pane.stop_playback()
         event.ignore()
         self.hide()
 

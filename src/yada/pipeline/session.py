@@ -35,6 +35,7 @@ from ..providers.base import (
     TransformOptions,
     TransformProvider,
 )
+from .recordings import Recording, RecordingStore, new_recording_id, now_iso
 from .transform import TransformOutcome, run_steps
 
 
@@ -85,6 +86,9 @@ class SessionDeps:
     events: SessionEvents
     chime: Callable[[Stage], None]
     deliver: Callable[[str, Stage], None]
+    # Where finished recordings go, so a failed transcription can be retried instead of
+    # repeated. None disables keeping any.
+    recordings: RecordingStore | None = None
 
 
 # How long a stop will wait for a socket that is still opening. Long enough to cover a slow
@@ -186,9 +190,7 @@ class DictationSession:
         # background. The sink queues about twenty seconds of audio, which is ample cover
         # for a connect, and the queued chunks are sent the moment the pump starts -- so
         # the live transcript still begins at the first word.
-        streaming = (
-            settings.transcription.prefer_streaming and provider.capabilities().streaming
-        )
+        streaming = settings.transcription.prefer_streaming and provider.capabilities().streaming
         if streaming:
             sink = StreamSink(self._loop)
             self._stream_sink = sink
@@ -216,9 +218,7 @@ class DictationSession:
         if streaming:
             self._stream_connect = asyncio.create_task(self._open_stream(provider, opts))
 
-    async def _open_stream(
-        self, provider: TranscriptionProvider, opts: TranscribeOptions
-    ) -> None:
+    async def _open_stream(self, provider: TranscriptionProvider, opts: TranscribeOptions) -> None:
         """Open the live socket while recording is already under way.
 
         Runs as a task so nothing the user can hear or see waits for the network. Audio has
@@ -302,6 +302,12 @@ class DictationSession:
             transcript, streamed, stt_warnings = await self._transcribe(buffer)
             warnings.extend(stt_warnings)
 
+            # Stored before anything can go wrong with the *rest* of the pipeline, and
+            # whether or not the transcription worked. A network error arrives after you
+            # have finished speaking, so the audio is always complete by this point --
+            # discarding it was throwing away a recording that was already good.
+            await self._remember(buffer, duration, transcript, streamed, warnings)
+
             if not transcript:
                 self._reset()
                 # The warnings are the only record of *why* nothing came back -- a model
@@ -346,6 +352,123 @@ class DictationSession:
                 )
             )
 
+    async def _remember(
+        self,
+        buffer: WavBuffer,
+        duration: float,
+        transcript: str,
+        streamed: bool,
+        warnings: list[str],
+    ) -> None:
+        """Write the recording and its outcome to the store. Never fatal."""
+        store = self._deps.recordings
+        if store is None or store.keep <= 0:
+            return
+        configured = self._deps.transcriber()
+        model = configured[1].model if configured else ""
+        provider = getattr(configured[0], "id", "") if configured else ""
+        entry = Recording(
+            id=new_recording_id(),
+            recorded_at=now_iso(),
+            duration_seconds=round(duration, 2),
+            transcript=transcript,
+            error="" if transcript else " ".join(warnings).strip(),
+            model=model,
+            provider=provider,
+            streamed=streamed,
+        )
+        with contextlib.suppress(Exception):
+            wav = await asyncio.to_thread(buffer.to_wav)
+            await asyncio.to_thread(store.add, wav, entry)
+
+    async def retry_last(self, *, deliver: bool = True) -> str:
+        """Transcribe the most recent recording again. What holding the shortcut does."""
+        return await self.retry(None, deliver=deliver)
+
+    async def retry(self, recording_id: str | None = None, *, deliver: bool = True) -> str:
+        """Transcribe a stored recording again. Returns the transcript, or "".
+
+        The point of the whole feature: a transcription failure is a failed *request*
+        against audio that was already complete, so it is worth another try rather than
+        asking the user to say it all again.
+
+        `recording_id` of None means the most recent. `deliver=False` is for the Recordings
+        tab, where pasting would land in yada's own window rather than wherever the user
+        actually wants the text.
+        """
+        store = self._deps.recordings
+        if store is None or store.keep <= 0:
+            self._deps.events.on_error(
+                "Recordings are not being kept, so there is nothing to retry."
+            )
+            return ""
+        if self._state is not SessionState.IDLE:
+            self._deps.events.on_warning("Still finishing the last dictation…")
+            return ""
+        if self._busy.locked():
+            return ""
+
+        async with self._busy:
+            if recording_id is None:
+                latest = await asyncio.to_thread(store.latest)
+            else:
+                latest = next(
+                    (r for r in await asyncio.to_thread(store.entries) if r.id == recording_id),
+                    None,
+                )
+            if latest is None:
+                self._deps.events.on_error("There is no recent recording to retry.")
+                return ""
+            wav = await asyncio.to_thread(store.read_audio, latest.id)
+            if not wav:
+                self._deps.events.on_error("That recording's audio is missing.")
+                return ""
+
+            configured = self._deps.transcriber()
+            if configured is None:
+                self._deps.events.on_error(
+                    "NOT_CONFIGURED: No transcription provider is configured yet. "
+                    "Add an API key on the Providers tab."
+                )
+                return ""
+            provider, opts = configured
+
+            self._set_state(SessionState.TRANSCRIBING)
+            try:
+                result = await provider.transcribe(wav, opts)
+            except Exception as exc:  # noqa: BLE001 - a retry that fails must not wedge anything
+                self._set_state(SessionState.IDLE)
+                self._deps.events.on_error(f"Retry failed: {_batch_failure_note(opts.model, exc)}")
+                return ""
+
+            text = (result.text or "").strip()
+            if not text:
+                self._set_state(SessionState.IDLE)
+                self._deps.events.on_error("The retry produced no text.")
+                return ""
+
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    store.update, latest.id, transcript=text, error="", model=opts.model
+                )
+
+            self._deps.chime(Stage.TRANSCRIPTION)
+            settings = self._deps.settings()
+            if deliver and settings.output.paste_mode != "off":
+                self._deps.deliver(text, Stage.TRANSCRIPTION)
+            self._set_state(SessionState.IDLE)
+            self._deps.events.on_finished(
+                SessionResult(
+                    transcript=text,
+                    final_text=text,
+                    duration_seconds=latest.duration_seconds,
+                    streamed=False,
+                    transform=None,
+                    warnings=["Retried the previous recording."],
+                )
+            )
+            return text
+
     async def _transcribe(self, buffer: WavBuffer) -> tuple[str, bool, list[str]]:
         """Prefer the already-open stream; fall back to batch on any failure."""
         warnings: list[str] = []
@@ -360,8 +483,7 @@ class DictationSession:
                     await asyncio.wait_for(self._pump, timeout=UPLOAD_DRAIN_TIMEOUT)
                 except TimeoutError:
                     warnings.append(
-                        "Some audio had not finished uploading, so the transcript may be "
-                        "cut short."
+                        "Some audio had not finished uploading, so the transcript may be cut short."
                     )
                 except Exception:  # noqa: BLE001 - a dead pump is handled by finish()
                     pass

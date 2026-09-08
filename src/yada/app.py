@@ -33,6 +33,7 @@ from .audio import warm_up as warm_up_audio
 from .config import Settings
 from .hotkey import Combo, InvalidCombo, create_backend
 from .output import ChimePlayer, copy, create_paste_backend
+from .pipeline.recordings import RecordingStore
 from .pipeline.session import (
     DictationSession,
     SessionDeps,
@@ -120,6 +121,12 @@ class EventBridge(QObject):
     # while finishing -- so the state stayed on "Transcribing…" indefinitely and nothing
     # was ever pasted.
     deliver_requested = Signal(str, object)
+    # Clipboard only, no keystroke. The Recordings tab's button lives inside yada's own
+    # window, so pasting would send the text straight back into the settings pane.
+    copy_requested = Signal(str)
+    # The recording store changed, so the Recordings tab should redraw. Its own signal
+    # rather than borrowing catalog_changed, which is about discovered models.
+    recordings_changed = Signal()
 
     def on_state(self, state: SessionState) -> None:
         self.state.emit(state)
@@ -142,6 +149,9 @@ class YadaApp(QObject):
         super().__init__()
         self.app = app
         self.settings: Settings = config.load()
+        # Audio of the last few dictations, so a network error at the end of one is worth
+        # retrying rather than repeating. `keep` is kept in step with the setting.
+        self.recordings = RecordingStore(keep=self.settings.output.keep_recordings)
         self.catalog = ModelCatalog()
         self.bridge = EventBridge()
         self.chimes = ChimePlayer()
@@ -167,6 +177,7 @@ class YadaApp(QObject):
                 events=self.bridge,
                 chime=self._chime,
                 deliver=self.bridge.deliver_requested.emit,
+                recordings=self.recordings,
             ),
         )
 
@@ -372,6 +383,10 @@ class YadaApp(QObject):
         )
         self.bridge.quit_requested.connect(self.quit, Qt.ConnectionType.QueuedConnection)
         self.bridge.deliver_requested.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
+        self.bridge.copy_requested.connect(self._copy_only, Qt.ConnectionType.QueuedConnection)
+        self.bridge.recordings_changed.connect(
+            self._push_recordings, Qt.ConnectionType.QueuedConnection
+        )
         self.bridge.audio_level.connect(self._on_audio_level, Qt.ConnectionType.QueuedConnection)
         self.bridge.partial.connect(self.overlay.set_partial, Qt.ConnectionType.QueuedConnection)
         self.bridge.provider_test_result.connect(
@@ -383,6 +398,11 @@ class YadaApp(QObject):
             if command == "toggle":
                 self.session.toggle()
                 return {"ok": True, "state": str(self.session.state)}
+            if command == "retry":
+                # For the backends that cannot tell a tap from a hold: bind this to a
+                # second shortcut and it does what holding the first one does.
+                self.retry_last()
+                return {"ok": True}
             if command == "settings":
                 self.bridge.open_settings_requested.emit()
                 return {"ok": True}
@@ -503,8 +523,62 @@ class YadaApp(QObject):
             self.tray.notify("Shortcut problem", str(exc), warning=True)
             combo = Combo.parse("ctrl+shift+;")
         self._hotkey = create_backend(self.settings.hotkey.backend, loop=self.loop)
-        self._hotkey.start(combo, self.session.toggle)
+        self._hotkey.start(combo, self.session.toggle, self.retry_last)
         self.tray.set_shortcut_label(self._shortcut_label())
+
+    def _push_recordings(self) -> None:
+        """Show what the store currently holds."""
+        window = self.settings_window
+        if window is None:
+            return
+        entries = self.recordings.entries()
+        window.set_recordings(entries, self.recordings.audio_path)
+        if self.recordings.keep <= 0:
+            window.set_recordings_status(
+                "Keeping recordings is turned off, so none are stored. Change that on the "
+                "System tab."
+            )
+        elif entries:
+            megabytes = self.recordings.total_bytes() / (1024 * 1024)
+            window.set_recordings_status(
+                f"{len(entries)} of up to {self.recordings.keep} kept · {megabytes:.1f} MB"
+            )
+        else:
+            window.set_recordings_status("")
+
+    def _transcribe_recording(self, recording_id: str) -> None:
+        """Transcribe one recording again and put the result on the clipboard.
+
+        Clipboard rather than paste: the button is in yada's own window, so pasting would
+        send the text straight back into the settings pane.
+        """
+
+        async def run() -> None:
+            text = await self.session.retry(recording_id, deliver=False)
+            if text:
+                self.bridge.copy_requested.emit(text)
+            self.bridge.recordings_changed.emit()
+
+        asyncio.run_coroutine_threadsafe(run(), self.loop)
+
+    def _delete_recording(self, recording_id: str) -> None:
+        with contextlib.suppress(Exception):
+            self.recordings.delete(recording_id)
+        self._push_recordings()
+
+    def _clear_recordings(self) -> None:
+        with contextlib.suppress(Exception):
+            self.recordings.clear()
+        self._push_recordings()
+
+    def retry_last(self) -> None:
+        """Transcribe the most recent recording again.
+
+        Reached by holding the shortcut, by `yada retry`, or from the Recordings tab. The
+        session does the work; this only crosses onto the asyncio loop, and is safe to call
+        from the hotkey thread.
+        """
+        asyncio.run_coroutine_threadsafe(self.session.retry_last(), self.loop)
 
     def _start_updates(self) -> None:
         service = UpdateService(
@@ -634,6 +708,10 @@ class YadaApp(QObject):
             window.preview_sound_requested.connect(self._preview_sound)
             window.mic_test_requested.connect(self._set_mic_test)
             window.reset_requested.connect(self._reset_settings)
+            window.recording_transcribe_requested.connect(self._transcribe_recording)
+            window.recording_delete_requested.connect(self._delete_recording)
+            window.recordings_clear_requested.connect(self._clear_recordings)
+            window.recordings_refresh_requested.connect(self._push_recordings)
             window.restart_requested.connect(self.restart)
             self.settings_window = window
         else:
@@ -904,6 +982,14 @@ class YadaApp(QObject):
         if not pasted and paste_error:
             self.bridge.warning.emit(f"{paste_error} The text is on your clipboard.")
 
+    def _copy_only(self, text: str) -> None:
+        """Clipboard, on the Qt thread. Qt's clipboard is GUI-thread-only."""
+        ok, error = copy(text)
+        if not ok:
+            self.bridge.warning.emit(f"Could not copy to the clipboard: {error}")
+        elif self.settings_window is not None:
+            self.settings_window.set_recordings_status("Copied to the clipboard.")
+
     def _copy_last(self) -> None:
         if text := self.tray.last_text:
             ok, error = copy(text)
@@ -1010,6 +1096,7 @@ class YadaApp(QObject):
                 reasoning=reasoning, efforts=caps.reasoning_efforts, priority=priority
             )
 
+        self._push_recordings()
         if self._hotkey is not None:
             window.set_hotkey_status(self._hotkey.status())
         if self._updates is not None:
@@ -1070,6 +1157,12 @@ class YadaApp(QObject):
 
         self._configure_chimes()
         self._apply_notification_setting()
+        self.recordings.keep = max(0, new_settings.output.keep_recordings)
+        if new_settings.output.keep_recordings < old.output.keep_recordings:
+            # Lowering the number should take effect now, not at the end of the next
+            # dictation -- someone reducing it is usually trying to keep less audio around.
+            with contextlib.suppress(Exception):
+                self.recordings.prune()
         if self._level_capture is not None and (
             new_settings.audio.device != old.audio.device
             or new_settings.audio.input_gain != old.audio.input_gain

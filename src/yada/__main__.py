@@ -87,6 +87,8 @@ USAGE = """yada — Yet Another Dictating App
 Usage:
   yada                 Start yada in the system tray (or focus a running instance)
   yada toggle          Start or stop recording in the running instance
+  yada retry           Transcribe the most recent recording again, when the first
+                       attempt failed (same as holding the shortcut)
   yada settings        Open the settings window
   yada stop            Quit the running instance
   yada status          Report whether yada is running
@@ -98,7 +100,9 @@ Usage:
   yada --help          Show this message
 
 Bind `yada toggle` to a shortcut in your desktop's keyboard settings on Wayland, where
-applications are not permitted to grab keys themselves.
+applications are not permitted to grab keys themselves. `yada retry` is worth a second
+shortcut there: a desktop-bound command cannot tell a tap from a hold, so holding the
+first one has nothing to detect.
 """
 
 
@@ -130,12 +134,17 @@ def main(argv: list[str] | None = None) -> int:
 
     command = args[0] if args else None
 
-    if command in ("toggle", "settings", "stop"):
+    if command in ("toggle", "retry", "settings", "stop"):
         wire = {"stop": "quit"}.get(command, command)
         reply = ipc.send_command(wire)
         if reply is not None:
             return 0 if reply.get("ok") else 1
         if command == "stop":
+            print("yada is not running.")
+            return 1
+        if command == "retry":
+            # Nothing to retry if nothing is running: starting up would not have the
+            # previous recording loaded, and silently recording instead would be worse.
             print("yada is not running.")
             return 1
         # Nothing listening: starting up and, for `toggle`, beginning to record is more
