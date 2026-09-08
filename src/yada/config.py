@@ -144,6 +144,10 @@ class OutputSettings:
     # This is audio of everything dictated, held on disk, so it is capped and can be
     # turned off entirely with 0. See pipeline/recordings.py.
     keep_recordings: int = 5
+    # A trailing line break on whatever leaves yada, so a pasted transcript ends a line
+    # instead of running into whatever you type next. Applied on the way out only: the
+    # transcript itself, the stored recording and the live panel are unchanged.
+    append_newline: bool = True
 
 
 @dataclass(slots=True)

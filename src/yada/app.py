@@ -965,6 +965,18 @@ class YadaApp(QObject):
             return
         self.chimes.play(stage)
 
+    def _outgoing(self, text: str) -> str:
+        """The text as it should leave yada: clipboard, keystroke, anywhere outward.
+
+        Applied here rather than in the pipeline on purpose. Adding the line break to the
+        transcript itself would put it in the stored recording, in the live panel, and in
+        what a transform is asked to clean up -- none of which is what "paste ends a line"
+        means. Four call sites share this so the answer cannot differ between them.
+        """
+        if not text or not self.settings.output.append_newline:
+            return text
+        return text if text.endswith("\n") else text + "\n"
+
     def _deliver(self, text: str, _stage: Stage) -> None:
         """Clipboard first, then the keystroke. Order matters: if pasting fails, the text is
         still on the clipboard and one Ctrl+V away.
@@ -974,7 +986,7 @@ class YadaApp(QObject):
         window rather than a thread but has no business being called from the event loop
         that is also feeding audio.
         """
-        ok, error = copy(text)
+        ok, error = copy(self._outgoing(text))
         if not ok:
             self.bridge.warning.emit(f"Could not copy to the clipboard: {error}")
             return
@@ -984,7 +996,7 @@ class YadaApp(QObject):
 
     def _copy_only(self, text: str) -> None:
         """Clipboard, on the Qt thread. Qt's clipboard is GUI-thread-only."""
-        ok, error = copy(text)
+        ok, error = copy(self._outgoing(text))
         if not ok:
             self.bridge.warning.emit(f"Could not copy to the clipboard: {error}")
         elif self.settings_window is not None:
@@ -992,7 +1004,7 @@ class YadaApp(QObject):
 
     def _copy_last(self) -> None:
         if text := self.tray.last_text:
-            ok, error = copy(text)
+            ok, error = copy(self._outgoing(text))
             if not ok:
                 self.tray.notify("Copy failed", error or "unknown error", warning=True)
 
@@ -1002,7 +1014,7 @@ class YadaApp(QObject):
         if self.settings.output.always_copy_to_clipboard and (
             self.settings.output.paste_mode == "off"
         ):
-            copy(result.final_text)
+            copy(self._outgoing(result.final_text))
 
         if result.warnings:
             # A warning has to be read, so the panel stays up carrying it.

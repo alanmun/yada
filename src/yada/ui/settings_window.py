@@ -1006,6 +1006,15 @@ class SettingsWindow(QWidget):
         paste_layout.addWidget(self.paste_mode)
         self.always_copy = QCheckBox("Always copy the result to the clipboard")
         paste_layout.addWidget(self.always_copy)
+        self.append_newline = QCheckBox("End the text with a line break")
+        paste_layout.addWidget(self.append_newline)
+        paste_layout.addWidget(
+            hint(
+                "What you dictated, followed by a new line — so a pasted transcript ends "
+                "cleanly instead of running into whatever you type next. The transcript "
+                "itself is unchanged."
+            )
+        )
         backend = create_paste_backend()
         paste_layout.addWidget(hint(backend.describe()))
         layout.addWidget(paste_box)
@@ -1256,6 +1265,7 @@ class SettingsWindow(QWidget):
         self.stt_model.set_current(s.transcription.model)
         self.tf_model.set_current(s.transform.model)
         self.always_copy.setChecked(s.output.always_copy_to_clipboard)
+        self.append_newline.setChecked(s.output.append_newline)
         self.show_notifications.setChecked(s.output.show_notifications)
         self.show_overlay.setChecked(s.output.show_overlay)
         self.keep_recordings.setValue(s.output.keep_recordings)
@@ -1339,6 +1349,7 @@ class SettingsWindow(QWidget):
         s.updates_enabled = self.update_enabled.isChecked()
         s.output.paste_mode = self._chosen(self.paste_mode, self._settings.output.paste_mode)
         s.output.always_copy_to_clipboard = self.always_copy.isChecked()
+        s.output.append_newline = self.append_newline.isChecked()
         s.output.show_notifications = self.show_notifications.isChecked()
         s.output.show_overlay = self.show_overlay.isChecked()
         s.output.keep_recordings = int(self.keep_recordings.value())
