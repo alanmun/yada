@@ -39,11 +39,13 @@ from ..output import sounds
 from .icons import close_icon
 from .widgets import hint
 
-# A trim is a multiplier on the master volume, so 100% means "as the file was recorded".
-# The range runs past that because the master defaults below full scale, which leaves real
-# headroom to lift a quiet import into line with the others.
+# 100% means "as the file was recorded". Above that the audio itself is amplified, so how
+# far a slider goes is a property of its file: one already peaking at full scale has nowhere
+# to go and its slider stops at 100%, where one peaking at -12 dBFS runs to 400%. The
+# alternative -- a uniform range where the top of the slider quietly does nothing on most
+# files -- is what made the first version of this feature look broken.
 MIN_GAIN_PERCENT = 0
-MAX_GAIN_PERCENT = 200
+MAX_GAIN_PERCENT = round(sounds.MAX_BOOST * 100)
 DEFAULT_GAIN = 1.0
 
 # Long enough that dragging a slider does not retrigger the sample on every pixel -- which
@@ -164,24 +166,24 @@ class _SoundRow(QFrame):
         play.clicked.connect(lambda: self.preview_requested.emit(self.sound.id))
         layout.addWidget(play)
 
+        self.ceiling = max(100, round(sounds.max_clean_gain(sound) * 100))
         self.level = QSlider(Qt.Orientation.Horizontal)
-        self.level.setRange(MIN_GAIN_PERCENT, MAX_GAIN_PERCENT)
-        self.level.setValue(_to_percent(gain))
+        self.level.setRange(MIN_GAIN_PERCENT, self.ceiling)
+        self.level.setValue(min(_to_percent(gain), self.ceiling))
         self.level.setPageStep(10)
         # Sized from the font rather than a fixed pixel count: the text scale runs to 2x,
         # and a slider that does not grow with it ends up a thumb with nowhere to travel.
         self.level.setFixedWidth(max(80, round(self.fontMetrics().height() * 5)))
-        self.level.setToolTip(
-            f"How loud \u201c{sound.name}\u201d is, relative to the chime volume above. "
-            "Remembered for this sound only."
-        )
+        self.level.setToolTip(self._explain())
         self.level.setAccessibleName(f"Level for {sound.name}")
         layout.addWidget(self.level)
 
         self._readout = QLabel()
         # Reserve the width of the widest value up front, or every row's X shifts sideways
         # as its own number changes.
-        self._readout.setMinimumWidth(self.fontMetrics().horizontalAdvance(" 200% "))
+        self._readout.setMinimumWidth(
+            self.fontMetrics().horizontalAdvance(f" {MAX_GAIN_PERCENT}% ")
+        )
         self._readout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self._readout)
         self._show_percent(self.level.value())
@@ -207,6 +209,21 @@ class _SoundRow(QFrame):
         layout.addWidget(self.remove)
         self.restyle()
 
+    def _explain(self) -> str:
+        """Say what this slider can do for this file, since that differs between files."""
+        name = self.sound.name
+        if self.ceiling <= 100:
+            return (
+                f"How loud \u201c{name}\u201d is, as a share of the chime volume above.\n\n"
+                "This file already peaks at full volume, so it can only be turned down — "
+                "there is no headroom left to amplify."
+            )
+        return (
+            f"How loud \u201c{name}\u201d is, as a share of the chime volume above.\n\n"
+            f"Above 100% the audio itself is amplified. This file is quiet enough to take "
+            f"{self.ceiling}% before it would clip, which is where the slider stops."
+        )
+
     def _on_level_changed(self, value: int) -> None:
         self._show_percent(value)
         self.gain_changed.emit()
@@ -221,7 +238,7 @@ class _SoundRow(QFrame):
     def set_gain(self, gain: float) -> None:
         """Show a stored level. Silent: adopting a saved value is not an edit, so it must
         neither replay the sound nor queue a save."""
-        value = _to_percent(gain)
+        value = min(_to_percent(gain), self.ceiling)
         if value == self.level.value():
             return
         self.level.blockSignals(True)
@@ -266,9 +283,10 @@ class SoundLibraryEditor(QWidget):
             "appear in both pickers above."
         )
         self._levels_hint = hint(
-            "Each sound keeps its own level, as a proportion of the chime volume above — "
-            "so a quiet recording and a loud one can be made to land the same. Moving one "
-            "plays it back at that level."
+            "Each sound keeps its own level, as a share of the chime volume above — so a "
+            "quiet recording and a loud one can be made to land the same. Moving one plays "
+            "it back at that level. Above 100% the audio itself is amplified, so how far a "
+            "slider goes depends on how much headroom that file has left."
         )
 
         self.import_button = QPushButton("Import sound…")

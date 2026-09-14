@@ -19,11 +19,13 @@ Design constraints worth stating, because they dictate the shape:
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..config import config_dir
 from ..pipeline.session import Stage
@@ -163,8 +165,7 @@ def _validate_wav(path: Path) -> None:
                 raise SoundError("That WAV file uses an unsupported sample format.")
     except wave.Error as exc:
         raise SoundError(
-            f"That WAV file could not be read ({exc}). It may be compressed rather than "
-            "plain PCM."
+            f"That WAV file could not be read ({exc}). It may be compressed rather than plain PCM."
         ) from exc
     except OSError as exc:
         raise SoundError(f"Could not read that file ({exc}).") from exc
@@ -268,9 +269,7 @@ def convert_to_wav(source: Path, destination: Path) -> None:
     if failure:
         raise SoundError(f"Could not decode that file: {failure[0]}")
     if not chunks:
-        raise SoundError(
-            "Could not decode that file. Converting it to a WAV first should work."
-        )
+        raise SoundError("Could not decode that file. Converting it to a WAV first should work.")
 
     pcm = b"".join(chunks)
     try:
@@ -293,8 +292,195 @@ def remove_sound(sound_id: str) -> bool:
     sound = resolve(sound_id)
     if sound is None or sound.builtin:
         return False
+    stamp = _stamp(sound.path)
     try:
         sound.path.unlink()
     except OSError:
         return False
+    # Its rendered levels are derived from a file that no longer exists.
+    _prune_levels(keep=None, stamp=stamp)
     return True
+
+
+# --------------------------------------------------------------------------------------
+# Levels
+#
+# A per-sound level cannot be a playback volume. QSoundEffect's volume tops out at full
+# scale, so with the master anywhere near 100% there is no headroom left to lift a quiet
+# import with -- at master 100% a "200%" trim is bit-for-bit identical to 100%. Boost is
+# therefore applied to the samples, which is the only place the loudness actually is.
+#
+# Attenuation stays on the playback volume: it always fits, and baking it into 16-bit
+# samples would throw away bits for nothing. So a level below 100% writes no file at all.
+#
+# How far a file can be lifted is a property of the file: one already peaking at full scale
+# has nowhere to go, one peaking at -12 dBFS has four times. That headroom is measured and
+# the boost is capped at it, so a level never clips -- it just stops getting louder, and the
+# UI stops offering more.
+# --------------------------------------------------------------------------------------
+
+# Rendered copies are derived data: deleting them costs one recomputation, so they live in
+# the cache directory rather than beside the imports they came from.
+LEVELS_DIRNAME = "levels"
+
+# Past this, boosting a chime is not a level any more. Also the point where a file quiet
+# enough to need it is usually quiet for a reason -- noise comes up with the signal.
+MAX_BOOST = 4.0
+
+# Leaves the peak a hair below full scale. Sample-domain gain is exact, but resampling in
+# the audio stack downstream can overshoot a touch, and an inaudible margin is cheaper than
+# finding out which backends do.
+PEAK_CEILING = 0.98
+
+
+def levels_dir() -> Path:
+    from ..config import cache_dir
+
+    return cache_dir() / LEVELS_DIRNAME
+
+
+def _stamp(path: Path) -> str:
+    """Identifies the exact bytes on disk, so a re-import under the same name re-renders."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return "missing"
+    digest = hashlib.sha1(
+        f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode(), usedforsecurity=False
+    )
+    return digest.hexdigest()[:12]
+
+
+def _decode(path: Path) -> tuple[Any, wave._wave_params]:
+    """WAV samples as float in -1..1, whatever width they were stored at.
+
+    Imports are converted to 16-bit on the way in, but a WAV copied in directly keeps its
+    own width, and the validator accepts 8, 16, 24 and 32-bit. All four appear here.
+    """
+    import numpy as np
+
+    with wave.open(str(path)) as wf:
+        params = wf.getparams()
+        raw = wf.readframes(wf.getnframes())
+
+    width = params.sampwidth
+    if width == 1:
+        # 8-bit WAV is unsigned, centred on 128.
+        samples = (np.frombuffer(raw, "<u1").astype(np.float32) - 128.0) / 128.0
+    elif width == 2:
+        samples = np.frombuffer(raw, "<i2").astype(np.float32) / 32768.0
+    elif width == 3:
+        # No 24-bit dtype exists, so the three bytes are reassembled and sign-extended.
+        usable = len(raw) - (len(raw) % 3)
+        trio = np.frombuffer(raw[:usable], np.uint8).reshape(-1, 3).astype(np.int32)
+        packed = trio[:, 0] | (trio[:, 1] << 8) | (trio[:, 2] << 16)
+        samples = np.where(packed & 0x800000, packed - 0x1000000, packed).astype(np.float32)
+        samples /= 8388608.0
+    elif width == 4:
+        samples = np.frombuffer(raw, "<i4").astype(np.float32) / 2147483648.0
+    else:
+        raise SoundError(f"Unsupported sample width: {width} bytes.")
+    return samples, params
+
+
+def _encode(samples: Any, params: wave._wave_params, destination: Path) -> None:
+    import numpy as np
+
+    clipped = np.clip(samples, -1.0, 1.0)
+    width = params.sampwidth
+    if width == 1:
+        raw = (clipped * 127.0 + 128.0).round().clip(0, 255).astype("<u1").tobytes()
+    elif width == 2:
+        raw = (clipped * 32767.0).round().clip(-32768, 32767).astype("<i2").tobytes()
+    elif width == 3:
+        as32 = (clipped * 8388607.0).round().clip(-8388608, 8388607).astype("<i4")
+        raw = as32.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
+    else:
+        raw = (clipped * 2147483647.0).round().clip(-2147483648, 2147483647).astype("<i4").tobytes()
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Write-then-rename: a half-written file here is a chime that does not play.
+    tmp = destination.with_suffix(".wav.tmp")
+    with wave.open(str(tmp), "wb") as wf:
+        wf.setnchannels(params.nchannels)
+        wf.setsampwidth(width)
+        wf.setframerate(params.framerate)
+        wf.writeframes(raw)
+    tmp.replace(destination)
+
+
+_peaks: dict[tuple[str, str], float] = {}
+
+
+def peak_level(sound: Sound) -> float:
+    """The loudest sample in the file, 0..1. Measured once per version of the file."""
+    key = (str(sound.path), _stamp(sound.path))
+    if key not in _peaks:
+        try:
+            import numpy as np
+
+            samples, _ = _decode(sound.path)
+            _peaks[key] = float(np.max(np.abs(samples))) if samples.size else 0.0
+        except (OSError, wave.Error, SoundError, ValueError):
+            # Unreadable here means unplayable later, and the caller's fallback for that is
+            # better than an exception from a volume slider. A peak of 1.0 offers no boost,
+            # which is the safe answer.
+            _peaks[key] = 1.0
+    return _peaks[key]
+
+
+def max_clean_gain(sound: Sound) -> float:
+    """How far this file can be lifted before it would clip, as a multiplier from 1.0.
+
+    A silent or unreadable file reports 1.0: there is nothing to make louder.
+    """
+    peak = peak_level(sound)
+    if peak <= 0.0:
+        return 1.0
+    return max(1.0, min(MAX_BOOST, PEAK_CEILING / peak))
+
+
+def playable(sound: Sound, gain: float) -> tuple[Path, float]:
+    """The file to play for `sound` at `gain`, and the volume multiplier still to apply.
+
+    Boost is baked into a rendered copy, up to what the file has headroom for; whatever is
+    left over -- attenuation, or a boost beyond the file's headroom -- comes back as a
+    multiplier for the caller to put on the playback volume, where it costs nothing.
+    """
+    try:
+        wanted = float(gain)
+    except (TypeError, ValueError):
+        wanted = 1.0
+    wanted = max(0.0, wanted)
+    baked = max(1.0, min(wanted, max_clean_gain(sound)))
+    remainder = wanted / baked if baked else wanted
+
+    if baked <= 1.0:
+        return sound.path, remainder
+    rendered = _render(sound, baked)
+    return (rendered, remainder) if rendered else (sound.path, wanted)
+
+
+def _render(sound: Sound, gain: float) -> Path | None:
+    """Write (or reuse) a copy of `sound` amplified by `gain`. None if it could not be."""
+    stamp = _stamp(sound.path)
+    destination = levels_dir() / f"{stamp}-{round(gain * 100)}.wav"
+    if destination.is_file():
+        return destination
+    try:
+        samples, params = _decode(sound.path)
+        _encode(samples * gain, params, destination)
+    except (OSError, wave.Error, SoundError, ValueError):
+        return None
+    _prune_levels(keep=destination, stamp=stamp)
+    return destination
+
+
+def _prune_levels(*, keep: Path | None, stamp: str) -> None:
+    """Drop this sound's other rendered levels. Dragging a slider makes one per stop."""
+    directory = levels_dir()
+    if not directory.is_dir():
+        return
+    for path in directory.glob(f"{stamp}-*.wav"):
+        if path != keep:
+            path.unlink(missing_ok=True)

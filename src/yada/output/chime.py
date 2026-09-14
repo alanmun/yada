@@ -19,17 +19,17 @@ from ..pipeline.session import Stage
 from . import sounds
 
 
-def effective_volume(master: float, gain: float) -> float:
-    """How loud one file plays: the master volume scaled by that file's own trim.
+def effective_volume(master: float, remainder: float) -> float:
+    """The playback volume for a file, once its boost has been baked into the samples.
 
-    A trim above 1.0 is allowed and does what you would expect until the product reaches
-    full scale, past which the file is already as loud as the device will play it. A trim
-    that is not a number at all -- settings.json is documented as hand-editable -- is read
-    as "untouched" rather than as silence, because a missing chime is the harder failure to
-    diagnose.
+    `remainder` is what sounds.playable() could not bake: attenuation, which always fits,
+    plus any boost beyond the file's own headroom, which does not and is clamped here. A
+    remainder that is not a number at all -- settings.json is documented as hand-editable --
+    reads as "untouched" rather than as silence, because a chime that never fires is the
+    harder failure to diagnose.
     """
     try:
-        trim = float(gain)
+        trim = float(remainder)
     except (TypeError, ValueError):
         trim = 1.0
     return max(0.0, min(1.0, max(0.0, min(1.0, master)) * max(0.0, trim)))
@@ -51,9 +51,11 @@ class ChimePlayer:
         # sets how loud one file is relative to the others, which is the only way two
         # imports mastered at different levels can be made to sit at the same loudness.
         self._gains: dict[str, float] = dict(gains or {})
-        # Effects are cached by path, but the trim is keyed by id, so the mapping between
-        # them has to be remembered at load time -- it is the only place both are in hand.
-        self._ids: dict[Path, str] = {}
+        # What each stage points at, as opposed to _for_stage's file actually played: a
+        # level change re-renders the latter, so the sound it came from has to be kept.
+        self._stage_sounds: dict[Stage, sounds.Sound] = {}
+        # Per played file, whatever part of its level could not be baked into the samples.
+        self._remainders: dict[Path, float] = {}
         # Previewed sounds are kept loaded so repeated Preview clicks stay instant, and so
         # _prune does not evict something the user is auditioning.
         self._previewed: set[Path] = set()
@@ -94,11 +96,9 @@ class ChimePlayer:
                 self.last_error = f"no sound available for {stage}"
                 self._for_stage.pop(stage, None)
                 continue
-            self._for_stage[stage] = sound.path
-            self._load(sound)
+            self._stage_sounds[stage] = sound
 
-        self._prune()
-        self._apply_volume()
+        self._resolve_stages()
 
     def preload(self) -> None:
         """Load the defaults. Kept for callers that have no settings yet."""
@@ -108,11 +108,25 @@ class ChimePlayer:
             transformation=sounds.DEFAULT_FOR_STAGE[Stage.TRANSFORMATION],
         )
 
-    def _load(self, sound: sounds.Sound) -> None:
-        path = sound.path
-        # Recorded even for an already-loaded effect: the same file can be reached by a
-        # stage and by a preview, and losing the id would silently drop its trim.
-        self._ids[path] = sound.id
+    def _resolve_stages(self) -> None:
+        """Work out which file each stage actually plays, and have it loaded and ready.
+
+        Done here rather than at play time because a boost is rendered to disk on first use,
+        and a chime is the one sound in the app that must not wait for anything.
+        """
+        for stage, sound in self._stage_sounds.items():
+            self._for_stage[stage] = self._prepare(sound)
+        self._prune()
+        self._apply_volume()
+
+    def _prepare(self, sound: sounds.Sound) -> Path:
+        """Render this sound at its level if need be, load it, and return what to play."""
+        path, remainder = sounds.playable(sound, self._gains.get(sound.id, 1.0))
+        self._remainders[path] = remainder
+        self._load(path)
+        return path
+
+    def _load(self, path: Path) -> None:
         if path in self._effects:
             return
         try:
@@ -129,16 +143,15 @@ class ChimePlayer:
         effect.setVolume(self._level(path))
         self._effects[path] = effect
 
+    def _level(self, path: Path) -> float:
+        return effective_volume(self._volume, self._remainders.get(path, 1.0))
+
     def _prune(self) -> None:
         """Drop effects nothing points at any more, so swapping sounds does not leak."""
         in_use = set(self._for_stage.values())
         for path in [p for p in self._effects if p not in in_use and p not in self._previewed]:
             self._effects.pop(path, None)
-            self._ids.pop(path, None)
-
-    def _level(self, path: Path) -> float:
-        """The volume to play the effect cached at `path` at."""
-        return effective_volume(self._volume, self._gains.get(self._ids.get(path, ""), 1.0))
+            self._remainders.pop(path, None)
 
     def _apply_volume(self) -> None:
         for path, effect in self._effects.items():
@@ -157,8 +170,13 @@ class ChimePlayer:
         Used by the settings window so auditioning a slider is heard at the level being
         dragged, not the one last written to disk a debounce ago.
         """
+        if dict(gains) == self._gains:
+            return
         self._gains = dict(gains)
-        self._apply_volume()
+        # A level change can move a stage onto a different file entirely -- a rendered copy
+        # instead of the original, or the other way round -- so the stages are re-resolved
+        # rather than merely re-volumed.
+        self._resolve_stages()
 
     def gain(self, sound_id: str) -> float:
         return self._gains.get(sound_id, 1.0)
@@ -181,10 +199,10 @@ class ChimePlayer:
         sound = sounds.resolve(sound_id)
         if sound is None:
             return
-        self._previewed.add(sound.path)
-        self._load(sound)
+        path = self._prepare(sound)
+        self._previewed.add(path)
         self._apply_volume()
-        self._play_path(sound.path)
+        self._play_path(path)
 
     def _play_path(self, path: Path) -> None:
         effect = self._effects.get(path)

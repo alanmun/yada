@@ -344,14 +344,29 @@ than by path: built-ins live inside the versioned install directory, which is re
 on every update. Imports are copied into the config directory and converted to PCM WAV once, at
 import, so playback stays on the low-latency path.
 
-Loudness is two numbers multiplied: a master volume, and a per-sound trim keyed by library id
-(`output.sound_gains`). The trim exists because imports arrive mastered at wildly different
-levels, and one master volume cannot make two of them sit at the same loudness. Only trims that
-differ from 1.0 are stored, and only for sounds that still exist — the sounds directory stays
-the single source of truth for what is in the library. `ChimePlayer` caches effects by path but
-keys trims by id, so it remembers the mapping at load time; the settings window pushes the
+Loudness is a master volume plus a per-sound level keyed by library id (`output.sound_gains`).
+The per-sound level exists because imports arrive mastered at wildly different levels, and one
+master volume cannot make two of them sit at the same loudness.
+
+**A level is not a playback volume.** That was the first implementation and it does not work:
+`QSoundEffect`'s volume tops out at full scale, so with the master at 100% there is no headroom
+left and a "200%" level is bit-for-bit identical to 100% — a quiet import cannot be lifted at
+all. Boost is therefore applied to the samples, which is the only place the loudness actually
+is, and rendered to a cached copy under `cache_dir()/levels`. Attenuation stays on the playback
+volume: it always fits, and baking it into 16-bit samples would discard bits for nothing. So a
+level below 100% writes no file, and `sounds.playable()` returns the file to play plus whatever
+multiplier is left for the volume.
+
+How far a file can be lifted is a property of the file — one already peaking at full scale has
+nowhere to go, one peaking at -12 dBFS has four times — so the boost is capped at the measured
+headroom and the slider's own maximum is set from it. A uniform range whose top third silently
+did nothing is what made the first version look broken.
+
+Only levels that differ from 1.0 are stored, and only for sounds that still exist, so the sounds
+directory stays the single source of truth for the library. The settings window pushes the
 current slider values straight into the player when auditioning, since the value being dragged
-is a debounce away from being saved.
+is a debounce away from being saved — a preview is played at master × that sound's level, so it
+is exactly what will fire in use.
 
 ## Auto-paste
 
