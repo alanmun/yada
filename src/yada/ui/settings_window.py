@@ -1069,7 +1069,7 @@ class SettingsWindow(QWidget):
             chime_layout.addWidget(row)
 
         self.chime_volume = VolumeRow()
-        self.chime_volume.changed.connect(
+        self.chime_volume.preview_requested.connect(
             lambda: self.preview_sound_requested.emit(self.chime_listening.current_sound())
         )
         chime_layout.addWidget(self.chime_volume)
@@ -1278,6 +1278,8 @@ class SettingsWindow(QWidget):
             s.output.chime_transformation_sound,
         )
         self.chime_volume.set_value(s.output.chime_volume)
+        # Levels before rows: refresh() builds each slider from what the editor holds.
+        self.sound_library.set_gains(s.output.sound_gains)
         self.sound_library.refresh()
 
         self.refresh_key_status()
@@ -1366,6 +1368,7 @@ class SettingsWindow(QWidget):
             self.chime_transformation.current_sound() or s.output.chime_transformation_sound
         )
         s.output.chime_volume = self.chime_volume.value()
+        s.output.sound_gains = self.sound_library.gains()
         return s
 
     def _select(self, combo: QComboBox, value) -> None:
@@ -1428,10 +1431,12 @@ class SettingsWindow(QWidget):
                 StepsEditor,
             )
             if isinstance(child, composites):
+                child.changed.connect(self._schedule_save)
                 if isinstance(child, SoundLibraryEditor):
+                    # Importing or removing changes what is stored as well as what is on
+                    # screen, so it saves too -- a level for a sound that is gone should
+                    # not outlive it in settings.json.
                     child.library_changed.connect(self._schedule_save)
-                else:
-                    child.changed.connect(self._schedule_save)
                 continue
             # A composite widget reports its own changes, so wiring the plumbing inside it
             # as well is not merely redundant -- it is a feedback loop.

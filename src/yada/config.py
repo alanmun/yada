@@ -131,6 +131,11 @@ class OutputSettings:
     chime_transcription_sound: str = "builtin:transcription"
     chime_transformation_sound: str = "builtin:transformation"
     chime_volume: float = 0.6
+    # Per-sound trim, keyed by library id, as a multiplier on chime_volume. Imports arrive
+    # mastered at wildly different levels -- one person's notification ping is six times
+    # hotter than another's -- so a single master volume cannot make two of them sit at the
+    # same loudness. Absent means 1.0, so this stays empty until someone touches a slider.
+    sound_gains: dict[str, float] = field(default_factory=dict)
     always_copy_to_clipboard: bool = True
     # Desktop notifications for warnings and errors. Off by default on Windows, where they
     # are intrusive toasts that steal a corner of the screen for something the chimes and
@@ -253,6 +258,8 @@ def from_dict(cls: type[T], data: Any) -> T:
         origin = typing.get_origin(tp)
         if is_dataclass(tp) and isinstance(tp, type):
             kwargs[f.name] = from_dict(tp, raw)
+        elif origin is dict and isinstance(raw, dict):
+            kwargs[f.name] = dict(raw)
         elif origin is list and isinstance(raw, list):
             (inner,) = typing.get_args(tp) or (Any,)
             if is_dataclass(inner) and isinstance(inner, type):

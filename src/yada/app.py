@@ -945,13 +945,20 @@ class YadaApp(QObject):
             transcription=out.chime_transcription_sound,
             transformation=out.chime_transformation_sound,
             volume=out.chime_volume,
+            gains=out.sound_gains,
         )
 
     def _preview_sound(self, sound_id: str) -> None:
-        """Play a sound from the settings window, at the volume currently on the slider."""
+        """Play a sound from the settings window, at the levels currently on the sliders.
+
+        Both the master volume and the per-sound trim are read from the widgets rather than
+        from settings, because a preview is the answer to a slider that is still moving and
+        the autosave that would make it official is a debounce away.
+        """
         window = self.settings_window
         if window is not None:
             self.chimes.set_volume(window.chime_volume.value())
+            self.chimes.set_gains(window.sound_library.gains())
         if sound_id:
             self.chimes.preview(sound_id)
 

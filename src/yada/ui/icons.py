@@ -1,7 +1,9 @@
-"""Tray icons, drawn at runtime instead of shipped as PNGs.
+"""Icons drawn at runtime instead of shipped as PNGs.
 
 Two reasons: they stay crisp at any tray size and DPI without shipping six variants, and
-there are no image assets to keep in sync with the states enum.
+there are no image assets to keep in sync with the states enum. A third applies to the
+close glyph: drawn here it can take its colour from the live palette, which is exactly what
+a shipped asset cannot do.
 
 Design constraint: a tray icon is often 16 px. Detail is wasted there, so state is carried by
 *colour on a filled disc* -- unmistakable at a glance and across light and dark trays --
@@ -10,8 +12,8 @@ with a simple microphone silhouette to say which app it is.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 from ..pipeline.session import SessionState
 
@@ -90,3 +92,46 @@ def all_state_icons() -> dict[SessionState, QIcon]:
     """Built once at startup: constructing a QIcon on every state change is wasteful and
     makes the tray flicker on some platforms."""
     return {state: state_icon(state) for state in SessionState}
+
+
+# --------------------------------------------------------------------------------------
+# Close glyph
+# --------------------------------------------------------------------------------------
+
+# Sizes a delete button asks for across the text-scale range. A QIcon picks the nearest and
+# Qt scales from there, so this only has to be dense enough that nothing is stretched far.
+_CLOSE_SIZES = (12, 16, 20, 24, 32)
+
+
+def _close_pixmap(colour: QColor, size: int) -> QPixmap:
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    pen = QPen(colour)
+    # Same weight as the checkbox tick, for the same reason: a hairline cross disappears
+    # at 12px and looks broken rather than subtle.
+    pen.setWidthF(max(1.6, size * 0.13))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+
+    near, far = size * 0.28, size * 0.72
+    painter.drawLine(QPointF(near, near), QPointF(far, far))
+    painter.drawLine(QPointF(far, near), QPointF(near, far))
+    painter.end()
+    return pm
+
+
+def close_icon(colour: QColor) -> QIcon:
+    """An X in `colour`, for a delete button.
+
+    Qt's own SP_DialogCloseButton is drawn by the platform style, which on Windows means a
+    near-black glyph. On the blue palette that is a dark X on a dark button -- present, but
+    only just, and indistinguishable at a glance from a disabled control. Passing the
+    palette's own button text colour in makes it legible in whichever theme is running.
+    """
+    icon = QIcon()
+    for size in _CLOSE_SIZES:
+        icon.addPixmap(_close_pixmap(colour, size))
+    return icon

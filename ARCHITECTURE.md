@@ -335,9 +335,23 @@ to detect that is different on each platform, and the differences are not incide
 
 ## Chimes
 
-Two distinct sounds — one when transcription completes, one when transformation completes — via
+Three distinct sounds — listening started, transcript ready, cleanup finished — via
 `QSoundEffect` (low-latency, short WAVs). Independently toggleable, because the transform chime
 is noise if no transform is configured.
+
+Built-ins and imported sounds are one library, addressed by id (`builtin:…`, `custom:…`) rather
+than by path: built-ins live inside the versioned install directory, which is replaced wholesale
+on every update. Imports are copied into the config directory and converted to PCM WAV once, at
+import, so playback stays on the low-latency path.
+
+Loudness is two numbers multiplied: a master volume, and a per-sound trim keyed by library id
+(`output.sound_gains`). The trim exists because imports arrive mastered at wildly different
+levels, and one master volume cannot make two of them sit at the same loudness. Only trims that
+differ from 1.0 are stored, and only for sounds that still exist — the sounds directory stays
+the single source of truth for what is in the library. `ChimePlayer` caches effects by path but
+keys trims by id, so it remembers the mapping at load time; the settings window pushes the
+current slider values straight into the player when auditioning, since the value being dragged
+is a debounce away from being saved.
 
 ## Auto-paste
 
