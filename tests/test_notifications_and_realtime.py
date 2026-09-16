@@ -177,7 +177,8 @@ class _ScriptedSocket:
         self.closed = True
 
 
-def test_a_refused_field_is_dropped_and_the_session_retried(monkeypatch):
+@pytest.mark.parametrize("structured", [False, True])
+def test_a_refused_field_is_dropped_and_the_session_retried(monkeypatch, structured):
     """`delay` and `keywords` are model-dependent, and a refusal kills the whole session.
 
     Measured against the live API: gpt-transcribe and gpt-4o-transcribe refuse `delay`,
@@ -192,8 +193,14 @@ def test_a_refused_field_is_dropped_and_the_session_retried(monkeypatch):
     sent: list[dict] = []
     refusal = (
         '{"type": "error", "error": {"message": '
-        '"The \'delay\' parameter is not supported for this model."}}'
+        "\"The 'delay' parameter is not supported for this model.\"}}"
     )
+    if structured:
+        refusal = (
+            '{"type": "error", "error": {"code": "unsupported_parameter", '
+            '"param": "session.audio.input.transcription.delay", '
+            '"message": "Parameter refused"}}'
+        )
     sockets = [
         _ScriptedSocket([refusal], sent),
         _ScriptedSocket(['{"type": "session.updated"}'], sent),
@@ -225,9 +232,7 @@ def test_an_unrelated_error_is_not_retried_as_a_field_problem(monkeypatch):
     from yada.providers.base import ProviderError
 
     sent: list[dict] = []
-    socket = _ScriptedSocket(
-        ['{"type": "error", "error": {"message": "invalid_model"}}'], sent
-    )
+    socket = _ScriptedSocket(['{"type": "error", "error": {"message": "invalid_model"}}'], sent)
 
     class FakeWebsockets:
         async def connect(self, url, **_kwargs):

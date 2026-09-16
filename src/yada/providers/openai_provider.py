@@ -19,6 +19,7 @@ import contextlib
 import json
 import re
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import replace
 from types import MappingProxyType
 from typing import ClassVar
 
@@ -95,6 +96,76 @@ _OPTIONAL_SESSION_FIELDS = ("delay", "keywords", "languages", "prompt")
 
 # One retry per optional field, plus one to spare.
 _MAX_FIELD_RETRIES = len(_OPTIONAL_SESSION_FIELDS) + 1
+
+
+def _error_fields(body: object) -> dict:
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        return body["error"]
+    return {}
+
+
+def _unsupported_field(error: dict, sent: Mapping[str, object]) -> str | None:
+    """Recover only from an explicitly unsupported, actually sent optional field.
+
+    An invalid value is not proof that a field is unsupported. Never learn from the
+    generic invalid_request_error type alone, or strip required fields such as model.
+    """
+    message = str(error.get("message") or "")
+    code = error.get("code")
+    unsupported = code in ("unknown_parameter", "unsupported_parameter") or any(
+        phrase in message.lower()
+        for phrase in (
+            "not supported",
+            "does not support",
+            "unknown parameter",
+            "unrecognized parameter",
+            "unsupported parameter",
+        )
+    )
+    if not unsupported:
+        return None
+    parameter = error.get("param")
+    if isinstance(parameter, str):
+        # Accept only paths to the transcription object, not unrelated namesakes.
+        for prefix in ("session.audio.input.transcription.", "transcription."):
+            if parameter.startswith(prefix):
+                parameter = parameter[len(prefix) :]
+                break
+    elif match := _UNSUPPORTED_RE.search(message):
+        parameter = match.group(1)
+    else:
+        # Older servers name the field in prose instead of setting error.param.
+        match = re.search(
+            r"(?:Unknown|Unrecognized|Unsupported) parameter:\s*'([^']+)'", message, re.I
+        )
+        parameter = match.group(1) if match else None
+    if parameter in _OPTIONAL_SESSION_FIELDS and parameter in sent:
+        return parameter
+    return None
+
+
+def _error_detail(error: dict, model: str, fallback: str) -> str:
+    metadata = [f"model={model}"]
+    for key in ("param", "code", "type"):
+        if error.get(key):
+            metadata.append(f"{key}={error[key]}")
+    detail = str(error.get("message") or fallback)[:1500]
+    return f"({', '.join(metadata)}): {detail}"
+
+
+def _http_error(resp: httpx.Response, operation: str, model: str) -> ProviderError:
+    try:
+        error = _error_fields(resp.json())
+    except ValueError:
+        error = {}
+    detail = _error_detail(error, model, resp.text)
+    if request_id := resp.headers.get("x-request-id"):
+        detail += f" [request_id={request_id}]"
+    return ProviderError(
+        f"OpenAI {operation} failed: {resp.status_code} {detail}",
+        provider=PROVIDER,
+        retryable=resp.status_code == 429 or resp.status_code >= 500,
+    )
 
 
 class _UnsupportedField(ProviderError):
@@ -266,9 +337,14 @@ class OpenAIRealtimeSession(StreamingSession):
                 ) from exc
             self._connected_url = url
 
-            await self._ws.send(json.dumps(self._session_update()))
             try:
+                await self._ws.send(json.dumps(self._session_update()))
                 await self._await_session_ready()
+            except asyncio.CancelledError:
+                # Stop's connection grace can expire while session confirmation is
+                # pending. The caller never receives this session, so it cannot close it.
+                await self._close()
+                raise
             except _UnsupportedField as exc:
                 # Drop the field and try again rather than giving up on live transcription
                 # for a parameter the user cannot see and did not ask for. Remembered, so
@@ -319,12 +395,12 @@ class OpenAIRealtimeSession(StreamingSession):
             if kind in ("session.updated", "transcription_session.updated"):
                 return
             if kind == "error":
-                detail = event.get("error", {}).get("message", "the session was rejected")
+                error = _error_fields(event)
+                detail = _error_detail(error, self._opts.model, "the session was rejected")
+                sent = self._session_update()["session"]["audio"]["input"]["transcription"]
                 await self._close()
-                if (match := _UNSUPPORTED_RE.search(detail)) and match.group(1) in (
-                    _OPTIONAL_SESSION_FIELDS
-                ):
-                    raise _UnsupportedField(match.group(1), detail)
+                if field := _unsupported_field(error, sent):
+                    raise _UnsupportedField(field, detail)
                 raise ProviderError(detail, provider=PROVIDER, retryable=True)
             # `session.created` and anything else informational: keep waiting.
 
@@ -341,7 +417,9 @@ class OpenAIRealtimeSession(StreamingSession):
                         self._final.set_result(event.get("transcript", ""))
                     await self._deltas.put(None)
                 elif kind == "error":
-                    detail = event.get("error", {}).get("message", "unknown realtime error")
+                    detail = _error_detail(
+                        _error_fields(event), self._opts.model, "unknown realtime error"
+                    )
                     if self._final and not self._final.done():
                         self._final.set_exception(
                             ProviderError(detail, provider=PROVIDER, retryable=True)
@@ -435,6 +513,11 @@ class OpenAITranscription(_OpenAIBase):
         return sorted(models, key=lambda m: m.sort_key)
 
     async def transcribe(self, wav_bytes: bytes, opts: TranscribeOptions) -> TranscriptionResult:
+        # The file endpoint needs a file model even when this call is rescuing a
+        # failed live session (or retrying a saved live recording). Sending the live
+        # model here produces a generic 400 invalid_parameter with param=null.
+        if opts.model == "gpt-live-transcribe":
+            opts = replace(opts, model="gpt-transcribe")
         data: dict[str, str] = {"model": opts.model}
         if opts.prompt:
             data["prompt"] = opts.prompt
@@ -444,17 +527,25 @@ class OpenAITranscription(_OpenAIBase):
         if opts.languages:
             data["languages"] = ",".join(opts.languages)
         async with self._client() as client:
-            resp = await client.post(
-                "/audio/transcriptions",
-                data=data,
-                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-            )
-        if resp.status_code >= 400:
-            raise ProviderError(
-                f"OpenAI transcription failed: {resp.status_code} {resp.text[:300]}",
-                provider=PROVIDER,
-                retryable=resp.status_code >= 500,
-            )
+            # Each retry removes one named optional field, so this is bounded. Keep
+            # batch refusals separate from realtime: their schemas can differ.
+            while True:
+                resp = await client.post(
+                    "/audio/transcriptions",
+                    data=data,
+                    files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                )
+                if resp.status_code == 400:
+                    try:
+                        error = _error_fields(resp.json())
+                    except ValueError:
+                        error = {}
+                    if field := _unsupported_field(error, data):
+                        del data[field]
+                        continue
+                if resp.status_code >= 400:
+                    raise _http_error(resp, "transcription", opts.model)
+                break
         body = resp.json()
         return TranscriptionResult(
             text=(body.get("text") or "").strip(), model=opts.model, provider=PROVIDER
@@ -604,11 +695,7 @@ class OpenAITransform(_OpenAIBase):
         async with self._client() as client:
             resp = await client.post("/responses", json=self._payload(system, user, opts))
         if resp.status_code >= 400:
-            raise ProviderError(
-                f"OpenAI transform failed: {resp.status_code} {resp.text[:300]}",
-                provider=PROVIDER,
-                retryable=resp.status_code >= 500,
-            )
+            raise _http_error(resp, "transform", opts.model)
         body = resp.json()
         usage = body.get("usage") or {}
         return TransformResult(

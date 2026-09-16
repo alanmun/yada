@@ -32,6 +32,7 @@ from ..config import Settings
 from ..providers.base import (
     TranscribeOptions,
     TranscriptionProvider,
+    TranscriptionResult,
     TransformOptions,
     TransformProvider,
 )
@@ -116,6 +117,7 @@ class DictationSession:
         # in flight when the user stops talking. See `_start`.
         self._stream_connect: asyncio.Task | None = None
         self._partial = ""
+        self._transcription_result: TranscriptionResult | None = None
         self._started_at = 0.0
         self._busy = asyncio.Lock()
 
@@ -367,6 +369,9 @@ class DictationSession:
         configured = self._deps.transcriber()
         model = configured[1].model if configured else ""
         provider = getattr(configured[0], "id", "") if configured else ""
+        if self._transcription_result is not None:
+            model = self._transcription_result.model
+            provider = self._transcription_result.provider
         entry = Recording(
             id=new_recording_id(),
             recorded_at=now_iso(),
@@ -449,7 +454,13 @@ class DictationSession:
 
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
-                    store.update, latest.id, transcript=text, error="", model=opts.model
+                    store.update,
+                    latest.id,
+                    transcript=text,
+                    error="",
+                    model=result.model,
+                    provider=result.provider,
+                    streamed=False,
                 )
 
             self._deps.chime(Stage.TRANSCRIPTION)
@@ -496,6 +507,7 @@ class DictationSession:
                 result = await self._stream_session.finish()
                 await self._cancel_delta_reader()
                 if result.text:
+                    self._transcription_result = result
                     return result.text, True, warnings
                 warnings.append("Live transcription returned nothing; retrying from the recording.")
             except Exception as exc:  # noqa: BLE001
@@ -512,6 +524,11 @@ class DictationSession:
         except Exception as exc:  # noqa: BLE001
             warnings.append(_batch_failure_note(opts.model, exc))
             return "", False, warnings
+        self._transcription_result = result
+        if result.model != opts.model:
+            warnings.append(
+                f"The recording was transcribed with {result.model} instead of {opts.model}."
+            )
         return result.text, False, warnings
 
     async def _transform(self, text: str, settings: Settings) -> TransformOutcome:
@@ -541,9 +558,9 @@ class DictationSession:
         """Give a socket that is still opening a moment to arrive before choosing a path.
 
         A recording can easily be shorter than a connect. Abandoning it the instant the
-        user stops talking would mean using batch instead -- and for a realtime-only model
-        such as gpt-live-transcribe that is not a fallback, it is an HTTP 404 and no
-        transcript at all.
+        user stops talking would mean uploading the audio again instead of using the
+        live connection. If this grace expires, the provider must choose a model that
+        accepts files for the fallback.
         """
         task, self._stream_connect = self._stream_connect, None
         if task is None or task.done():
@@ -590,6 +607,7 @@ class DictationSession:
         self._stream_session = None
         self._pump = None
         self._partial = ""
+        self._transcription_result = None
         self._set_state(SessionState.IDLE)
 
     async def shutdown(self) -> None:
@@ -601,17 +619,5 @@ class DictationSession:
 
 
 def _batch_failure_note(model: str, exc: Exception) -> str:
-    """Explain a failed batch transcription in terms of the cause, not the status code.
-
-    Some models are realtime-only: `gpt-live-transcribe` answers the batch endpoint with a
-    bare HTTP 404 "Invalid URL", which read as though yada had the wrong address. When live
-    transcription is also unavailable there is nothing left to try, and saying so beats
-    reporting a 404 the user cannot act on.
-    """
-    detail = str(exc)
-    if "404" in detail or "Invalid URL" in detail:
-        return (
-            f"{model} only works with live transcription, and the live connection was not "
-            "available, so there was nothing to fall back to."
-        )
-    return f"Transcription failed: {detail}"
+    """Keep the actual failure; a 404 alone cannot identify a model's capabilities."""
+    return f"Transcription failed (selected model: {model}): {exc}"

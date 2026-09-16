@@ -515,8 +515,7 @@ async def test_audio_spoken_during_the_connect_still_reaches_the_stream(fake_aud
 async def test_a_recording_shorter_than_the_connect_still_streams(fake_audio):
     """Stopping before the socket is open must not silently mean batch.
 
-    For a realtime-only model such as gpt-live-transcribe batch is an HTTP 404, so
-    abandoning a half-open connect would produce no transcript at all.
+    Give an almost-ready stream a chance before uploading the recording again.
     """
     stream = FakeStream()
     stt = SlowOpenTranscriber(stream=stream)
@@ -529,7 +528,7 @@ async def test_a_recording_shorter_than_the_connect_still_streams(fake_audio):
     await stop
 
     assert rec.finished[0].streamed is True, "the stop should wait briefly for the socket"
-    assert stt.batch_calls == 0, "batch is not a fallback for a realtime-only model"
+    assert stt.batch_calls == 0, "an almost-ready stream should avoid another upload"
 
 
 async def test_a_connect_that_never_arrives_does_not_hang_the_stop(fake_audio, monkeypatch):
@@ -625,6 +624,8 @@ async def test_a_successful_dictation_is_kept(fake_audio, store):
     assert len(entries) == 1
     assert entries[0].transcript == "hello there"
     assert entries[0].succeeded is True
+    assert entries[0].model == "batch", "record the actual result model, including fallbacks"
+    assert entries[0].provider == "fake"
     assert store.read_audio(entries[0].id), "the audio has to be there to retry"
 
 
@@ -724,3 +725,46 @@ async def test_a_failing_retry_leaves_the_recording_alone(fake_audio, store):
     assert any("Retry failed" in e for e in rec.errors)
     assert store.read_audio(store.entries()[0].id), "the audio is still there to try again"
     assert sess.state is SessionState.IDLE
+
+
+async def test_openai_live_timeout_recovers_with_file_model(monkeypatch, store):
+    """The Windows failure: live connect stalls, then the live model rejects file upload."""
+    import httpx
+
+    from yada.providers.openai_provider import OpenAITranscription
+
+    monkeypatch.setattr(session_mod, "STREAM_CONNECT_GRACE", 0.01)
+    provider = OpenAITranscription("test")
+    requests = []
+
+    async def stalled_connect(opts):
+        await asyncio.Future()
+
+    def respond(request):
+        requests.append(request)
+        if b'gpt-live-transcribe' in request.content:
+            return httpx.Response(400, json={"error": {
+                "message": "Invalid request.", "type": "invalid_request_error",
+                "param": None, "code": "invalid_parameter",
+            }})
+        assert b'gpt-transcribe' in request.content
+        assert b'RIFF' in request.content
+        return httpx.Response(200, json={"text": "Recovered the recording"})
+
+    monkeypatch.setattr(provider, "open_stream", stalled_connect)
+    monkeypatch.setattr(provider, "_client", lambda: httpx.AsyncClient(
+        base_url="https://api.openai.com/v1", transport=httpx.MockTransport(respond),
+    ))
+    sess, rec, _ = build(transcriber=provider, recordings=store)
+    sess._deps.transcriber = lambda: (provider, TranscribeOptions(model="gpt-live-transcribe"))
+    await sess.toggle_async()
+    await sess.toggle_async()
+
+    assert not rec.errors
+    assert rec.finished[0].transcript == "Recovered the recording"
+    assert not rec.finished[0].streamed
+    assert len(requests) == 1
+    assert store.entries()[0].model == "gpt-transcribe"
+    assert any("did not finish opening" in w for w in rec.finished[0].warnings)
+    assert await sess.retry_last(deliver=False) == "Recovered the recording"
+    assert store.entries()[0].model == "gpt-transcribe"
