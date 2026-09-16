@@ -126,6 +126,7 @@ def _unsupported_field(error: dict, sent: Mapping[str, object]) -> str | None:
         return None
     parameter = error.get("param")
     if isinstance(parameter, str):
+        parameter = parameter.removesuffix("[]")
         # Accept only paths to the transcription object, not unrelated namesakes.
         for prefix in ("session.audio.input.transcription.", "transcription."):
             if parameter.startswith(prefix):
@@ -518,21 +519,25 @@ class OpenAITranscription(_OpenAIBase):
         # model here produces a generic 400 invalid_parameter with param=null.
         if opts.model == "gpt-live-transcribe":
             opts = replace(opts, model="gpt-transcribe")
-        data: dict[str, str] = {"model": opts.model}
+        data: dict[str, str | list[str]] = {"model": opts.model}
         if opts.prompt:
             data["prompt"] = opts.prompt
         if opts.keywords:
-            # One term per line, per the docs' guidance for keyword hints.
-            data["keywords"] = "\n".join(opts.keywords)
+            data["keywords"] = list(opts.keywords)
         if opts.languages:
-            data["languages"] = ",".join(opts.languages)
+            data["languages"] = list(opts.languages)
         async with self._client() as client:
             # Each retry removes one named optional field, so this is bounded. Keep
             # batch refusals separate from realtime: their schemas can differ.
             while True:
                 resp = await client.post(
                     "/audio/transcriptions",
-                    data=data,
+                    # Multipart arrays require repeated name[] parts. Joining values
+                    # into a string causes a generic 400 invalid_value, with no param.
+                    data={
+                        f"{name}[]" if isinstance(value, list) else name: value
+                        for name, value in data.items()
+                    },
                     files={"file": ("audio.wav", wav_bytes, "audio/wav")},
                 )
                 if resp.status_code == 400:

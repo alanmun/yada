@@ -70,9 +70,9 @@ async def test_batch_retries_same_audio_dropping_only_named_optional_fields(monk
     result = await provider.transcribe(audio, options)
     assert result.text == "Recovered"
     assert len(requests) == 3
-    assert b'name="keywords"' not in requests[1].content
-    assert b'name="languages"' in requests[1].content
-    assert b'name="languages"' not in requests[2].content
+    assert b'name="keywords[]"' not in requests[1].content
+    assert b'name="languages[]"' in requests[1].content
+    assert b'name="languages[]"' not in requests[2].content
     assert options.keywords == ("yada",)
     assert options.languages == ("en",)
 
@@ -218,3 +218,57 @@ async def test_cancelled_session_confirmation_closes_socket(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert socket.closed
+
+
+@pytest.mark.parametrize(
+    "keywords,languages",
+    [
+        (("Troutwood", "Yazid", "Finn", "Yada"), ("en",)),
+        (("one",), ("en", "es")),
+        ((), ()),
+    ],
+)
+async def test_file_hints_are_multipart_arrays(monkeypatch, keywords, languages):
+    """Validate the actual wire format, including single-item arrays, like the API does."""
+    from email.parser import BytesParser
+    from email.policy import default
+
+    def respond(request):
+        message = BytesParser(policy=default).parsebytes(
+            b"Content-Type: "
+            + request.headers["content-type"].encode()
+            + b"\r\n\r\n"
+            + request.content
+        )
+        fields = {}
+        for part in message.iter_parts():
+            name = part.get_param("name", header="content-disposition")
+            fields.setdefault(name, []).append(part.get_payload(decode=True))
+        assert "keywords" not in fields, "scalar keywords produce invalid_value"
+        assert "languages" not in fields, "scalar languages produce invalid_value"
+        assert fields.get("keywords[]", []) == [value.encode() for value in keywords]
+        assert fields.get("languages[]", []) == [value.encode() for value in languages]
+        assert fields["model"] == [b"gpt-transcribe"]
+        assert fields["prompt"] == [b"Context"]
+        assert fields["file"] == [b"audio bytes"]
+        return httpx.Response(200, json={"text": "accepted"})
+
+    provider = OpenAITranscription("test")
+    monkeypatch.setattr(
+        provider,
+        "_client",
+        lambda: httpx.AsyncClient(
+            base_url="https://api.openai.com/v1",
+            transport=httpx.MockTransport(respond),
+        ),
+    )
+    result = await provider.transcribe(
+        b"audio bytes",
+        TranscribeOptions(
+            model="gpt-live-transcribe",
+            keywords=keywords,
+            languages=languages,
+            prompt="Context",
+        ),
+    )
+    assert result.text == "accepted"
