@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication
 
 from yada.pipeline.session import SessionResult, SessionState
 from yada.pipeline.transform import TransformOutcome
+from yada.updater.service import UpdateStatus
 
 
 @pytest.fixture(scope="module")
@@ -170,6 +171,36 @@ def test_copy_transform_action_is_only_shown_when_transforms_are_enabled(yada):
     assert yada.tray._action_copy_transform.isVisible() is False
     yada.tray.set_transform_enabled(True)
     assert yada.tray._action_copy_transform.isVisible() is True
+
+
+def test_download_progress_only_refreshes_update_controls(yada, monkeypatch):
+    """Archive chunks must not rebuild every settings tab and starve Qt's event loop."""
+
+    class UpdateWidgets:
+        def __init__(self) -> None:
+            self.statuses: list[str] = []
+            self.ready: list[str | None] = []
+
+        def set_update_status(self, text: str) -> None:
+            self.statuses.append(text)
+
+        def set_update_ready(self, version: str | None) -> None:
+            self.ready.append(version)
+
+    widgets = UpdateWidgets()
+    yada.settings_window = widgets
+    monkeypatch.setattr(
+        yada,
+        "_push_status_to_settings",
+        lambda: pytest.fail("download progress refreshed unrelated settings controls"),
+    )
+
+    yada._on_update_status(
+        UpdateStatus(available_version="0.2.0", downloading=True, progress=0.5)
+    )
+
+    assert widgets.statuses == ["Downloading 0.2.0 (50%)…"]
+    assert widgets.ready == [None]
 
 
 def test_an_error_is_reported_rather_than_swallowed(yada, qapp):

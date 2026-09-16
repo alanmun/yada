@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,6 +32,10 @@ from .github import (
 # Checked a minute after startup rather than immediately, so an update check never competes
 # with showing the tray icon.
 INITIAL_DELAY_SECONDS = 60.0
+# A release archive arrives in 64 KiB chunks. Forwarding every chunk to Qt can enqueue
+# thousands of updates faster than the UI thread can paint them, making Windows declare
+# the app unresponsive even though the download itself is on the asyncio thread.
+PROGRESS_NOTIFY_INTERVAL_SECONDS = 0.1
 
 
 @dataclass(slots=True)
@@ -156,9 +161,16 @@ class UpdateService:
         return self.status
 
     async def _stage(self, release: Release) -> None:
+        last_progress_notification = 0.0
+
         def progress(done: int, total: int) -> None:
+            nonlocal last_progress_notification
             self.status.progress = (done / total) if total else -1.0
-            self._notify()
+            now = time.monotonic()
+            complete = total > 0 and done >= total
+            if complete or now - last_progress_notification >= PROGRESS_NOTIFY_INTERVAL_SECONDS:
+                last_progress_notification = now
+                self._notify()
 
         self.status.downloading = True
         self.status.progress = 0.0

@@ -740,6 +740,40 @@ async def test_a_second_check_while_one_is_running_is_ignored(install_root, monk
     assert started == 1, f"expected one check, {started} ran"
 
 
+async def test_download_progress_is_throttled_before_reaching_the_ui(
+    install_root, tmp_path, monkeypatch
+):
+    """One signal per 64 KiB chunk can make Qt look hung on a fast large download."""
+    from yada.updater import service as svc
+
+    archive = tmp_path / "update.zip"
+    archive.write_bytes(b"archive")
+
+    async def noisy_download(_release, **kwargs):
+        progress = kwargs["on_progress"]
+        for done in range(1, 1001):
+            progress(done, 1000)
+        return archive
+
+    monkeypatch.setattr(svc, "download_and_verify", noisy_download)
+    monkeypatch.setattr(svc, "extract_release", lambda *_args: None)
+    monkeypatch.setattr(svc, "prune_old_versions", lambda: [])
+    notifications: list[float] = []
+    service = svc.UpdateService(
+        repo="x/y",
+        current_version="1.0.0",
+        on_change=lambda status: notifications.append(status.progress),
+    )
+    release = svc.Release(
+        version="2.0.0", tag="v2.0.0", notes="", prerelease=False, assets=()
+    )
+
+    await service._stage(release)
+
+    assert notifications[-1] == 1.0
+    assert len(notifications) < 10, "a burst of chunks should become a few UI updates"
+
+
 def test_a_file_removed_after_extraction_is_named(install_root, tmp_path, monkeypatch):
     """ "contains no yada.exe" said nothing about why, and we saw it twice.
 

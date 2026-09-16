@@ -1081,11 +1081,16 @@ class YadaApp(QObject):
         self.tray.notify("yada", message, warning=True)
 
     def _on_update_status(self, status) -> None:
-        if status is not None and self._updates is not None:
-            self.tray.set_update_ready(status.ready_version)
-            if self.settings_window is not None:
-                self.settings_window.set_update_ready(status.ready_version)
-        self._push_status_to_settings()
+        if status is None:
+            return
+        self.tray.set_update_ready(status.ready_version)
+        if self.settings_window is not None:
+            # Progress can arrive many times during one download. Updating only these two
+            # controls avoids rebuilding model lists, capabilities and recording rows for
+            # every archive chunk, which starved the Windows event loop and looked like a
+            # hung application.
+            self.settings_window.set_update_status(status.summary())
+            self.settings_window.set_update_ready(status.ready_version)
 
     def _push_status_to_settings(self) -> None:
         window = self.settings_window
