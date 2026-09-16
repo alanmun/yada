@@ -182,6 +182,7 @@ class YadaApp(QObject):
         )
 
         self.tray = TrayIcon(shortcut_label=self._shortcut_label())
+        self.tray.set_transform_enabled(self.settings.transform.enabled)
         # The only place live transcription is visible. Never takes focus; see overlay.py.
         self.overlay = LiveOverlay()
         self._connect()
@@ -362,7 +363,8 @@ class YadaApp(QObject):
     def _connect(self) -> None:
         self.tray.toggle_requested.connect(self.toggle)
         self.tray.settings_requested.connect(self.show_settings)
-        self.tray.copy_last_requested.connect(self._copy_last)
+        self.tray.copy_last_transcript_requested.connect(self._copy_last_transcript)
+        self.tray.copy_last_transform_requested.connect(self._copy_last_transform)
         self.tray.check_updates_requested.connect(self.check_updates)
         self.tray.restart_requested.connect(self.restart)
         self.tray.quit_requested.connect(self.quit)
@@ -1009,8 +1011,14 @@ class YadaApp(QObject):
         elif self.settings_window is not None:
             self.settings_window.set_recordings_status("Copied to the clipboard.")
 
-    def _copy_last(self) -> None:
-        if text := self.tray.last_text:
+    def _copy_last_transcript(self) -> None:
+        if text := self.tray.last_transcript:
+            ok, error = copy(self._outgoing(text))
+            if not ok:
+                self.tray.notify("Copy failed", error or "unknown error", warning=True)
+
+    def _copy_last_transform(self) -> None:
+        if text := self.tray.last_transform:
             ok, error = copy(self._outgoing(text))
             if not ok:
                 self.tray.notify("Copy failed", error or "unknown error", warning=True)
@@ -1018,8 +1026,17 @@ class YadaApp(QObject):
     def _on_finished(self, result: SessionResult) -> None:
         self.tray.set_state(SessionState.IDLE)
         self.tray.set_result(result)
-        if self.settings.output.always_copy_to_clipboard and (
-            self.settings.output.paste_mode == "off"
+        # "Paste after transcription" deliberately delivers the fast first result, but
+        # cleanup finishes later. Keep the default clipboard-copy promise by replacing
+        # that transcript with the transformed result once it is ready. A paste after
+        # transformation has already copied the same final text in _deliver().
+        final_was_delivered = self.settings.output.paste_mode == "after_transformation"
+        transcript_was_delivered = (
+            self.settings.output.paste_mode == "after_transcription"
+            and result.transform is None
+        )
+        if self.settings.output.always_copy_to_clipboard and not (
+            final_was_delivered or transcript_was_delivered
         ):
             copy(self._outgoing(result.final_text))
 
@@ -1195,6 +1212,7 @@ class YadaApp(QObject):
             self._sync_desktop_integration()
         self._tidy_install()
         self.tray.set_shortcut_label(self._shortcut_label())
+        self.tray.set_transform_enabled(new_settings.transform.enabled)
         if new_settings.transcription.provider != old.transcription.provider:
             self.refresh_models("transcription")
         if new_settings.transform.provider != old.transform.provider:

@@ -262,16 +262,23 @@ class StepsEditor(QWidget):
         if not (0 <= row < len(self._steps)):
             return
         step = self._steps[row]
+        enabled_changed = False
         if step.type == "prompt_transform":
+            enabled_changed = step.enabled != self.enabled_box.isChecked()
             step.enabled = self.enabled_box.isChecked()
             step.system_prompt = self.system_prompt.toPlainText()
             step.user_prompt_template = self.user_template.text()
         else:
+            enabled_changed = step.enabled != self.fr_enabled.isChecked()
             step.enabled = self.fr_enabled.isChecked()
             step.find = self.find_field.text()
             step.replace = self.replace_field.text()
             step.use_regex = self.regex_box.isChecked()
-        self._rebuild_list()
+        # The list text only reflects whether a step is enabled. Rebuilding it for every
+        # character clears and reselects the current row, which reloads this editor with
+        # setPlainText() and sends the caret back to the beginning.
+        if enabled_changed:
+            self._rebuild_list()
         self._validate_regex()
         self.changed.emit()
 

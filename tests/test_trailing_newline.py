@@ -86,7 +86,7 @@ def test_every_way_out_goes_through_it(yada, qapp, monkeypatch):
             warnings=[],
         )
     )
-    yada._copy_last()
+    yada._copy_last_transcript()
 
     yada.settings.output.paste_mode = "off"
     yada.settings.output.always_copy_to_clipboard = True
@@ -126,5 +126,5 @@ def test_the_transcript_itself_is_untouched(yada, qapp):
 
     assert result.transcript == "no break here", "the result object is not rewritten"
     assert not yada.overlay.text.text().endswith("\n")
-    assert yada.tray.last_text == "no break here"
+    assert yada.tray.last_transcript == "no break here"
     assert yada.session.state is not SessionState.RECORDING

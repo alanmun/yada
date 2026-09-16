@@ -36,7 +36,8 @@ class TrayIcon(QObject):
 
     toggle_requested = Signal()
     settings_requested = Signal()
-    copy_last_requested = Signal()
+    copy_last_transcript_requested = Signal()
+    copy_last_transform_requested = Signal()
     check_updates_requested = Signal()
     restart_requested = Signal()
     quit_requested = Signal()
@@ -46,7 +47,8 @@ class TrayIcon(QObject):
         self._icons: dict[SessionState, QIcon] = all_state_icons()
         self._state = SessionState.IDLE
         self._shortcut_label = shortcut_label
-        self._last_text: str | None = None
+        self._last_transcript: str | None = None
+        self._last_transform: str | None = None
         self._update_ready: str | None = None
         self._status_line = "Ready"
         # Set from settings once they are loaded; see app.py::_apply_notification_setting.
@@ -66,9 +68,16 @@ class TrayIcon(QObject):
         self._action_toggle = QAction("Start dictation", self._menu)
         self._action_toggle.triggered.connect(self.toggle_requested.emit)
 
-        self._action_copy = QAction("Copy last result", self._menu)
-        self._action_copy.setEnabled(False)
-        self._action_copy.triggered.connect(self.copy_last_requested.emit)
+        self._action_copy_transcript = QAction("Copy last transcript", self._menu)
+        self._action_copy_transcript.setEnabled(False)
+        self._action_copy_transcript.triggered.connect(
+            self.copy_last_transcript_requested.emit
+        )
+
+        self._action_copy_transform = QAction("Copy last transform", self._menu)
+        self._action_copy_transform.setEnabled(False)
+        self._action_copy_transform.setVisible(False)
+        self._action_copy_transform.triggered.connect(self.copy_last_transform_requested.emit)
 
         self._action_settings = QAction("Settings…", self._menu)
         self._action_settings.triggered.connect(self.settings_requested.emit)
@@ -88,7 +97,8 @@ class TrayIcon(QObject):
 
         self._menu.addAction(self._action_toggle)
         self._menu.addSeparator()
-        self._menu.addAction(self._action_copy)
+        self._menu.addAction(self._action_copy_transcript)
+        self._menu.addAction(self._action_copy_transform)
         self._menu.addSeparator()
         self._menu.addAction(self._action_settings)
         self._menu.addAction(self._action_update)
@@ -128,14 +138,20 @@ class TrayIcon(QObject):
         self._refresh()
 
     def set_result(self, result: SessionResult) -> None:
-        self._last_text = result.final_text
-        self._action_copy.setEnabled(bool(result.final_text))
+        self._last_transcript = result.transcript
+        self._action_copy_transcript.setEnabled(bool(result.transcript))
+        if result.transform is not None:
+            self._last_transform = result.final_text
+            self._action_copy_transform.setEnabled(bool(result.final_text))
         words = len(result.final_text.split())
         path = "streamed" if result.streamed else "uploaded"
         self._status_line = (
             f"{words} word{'s' if words != 1 else ''} in {result.duration_seconds:.1f}s ({path})"
         )
         self._refresh()
+
+    def set_transform_enabled(self, enabled: bool) -> None:
+        self._action_copy_transform.setVisible(enabled)
 
     def set_update_ready(self, version: str | None) -> None:
         """Reflected in the menu, not as a popup.
@@ -154,8 +170,12 @@ class TrayIcon(QObject):
         self._refresh()
 
     @property
-    def last_text(self) -> str | None:
-        return self._last_text
+    def last_transcript(self) -> str | None:
+        return self._last_transcript
+
+    @property
+    def last_transform(self) -> str | None:
+        return self._last_transform
 
     def _refresh(self) -> None:
         recording = self._state is SessionState.RECORDING

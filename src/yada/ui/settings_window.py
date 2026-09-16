@@ -571,11 +571,17 @@ class SettingsWindow(QWidget):
         # straight to the column is flush against the edge -- which is why the priority
         # tick box and the reasoning row did not line up with each other.
         row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(labelled("Provider", self.tf_provider), 1)
-        row.addWidget(labelled("Model", self.tf_model), 2)
+        # ModelPicker is taller because it includes discovery status beneath its controls.
+        # Pin both labelled fields to the top so that their captions and input controls
+        # share the same y positions instead of Qt vertically centring the shorter provider.
+        row.addWidget(
+            labelled("Provider", self.tf_provider), 1, Qt.AlignmentFlag.AlignTop
+        )
+        row.addWidget(labelled("Model", self.tf_model), 2, Qt.AlignmentFlag.AlignTop)
         holder = QWidget()
         holder.setLayout(row)
         body.addWidget(holder)
+        body.addSpacing(max(6, round(self.fontMetrics().height() * 0.4)))
 
         self.tf_priority = SupportCheckBox("priority")
         body.addWidget(self.tf_priority)

@@ -18,6 +18,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
 
 from yada.pipeline.session import SessionResult, SessionState
+from yada.pipeline.transform import TransformOutcome
 
 
 @pytest.fixture(scope="module")
@@ -121,6 +122,54 @@ def test_whether_it_was_live_is_still_recorded_on_the_tray(yada, qapp):
         assert expected in yada.tray._status_line, (
             f"streamed={streamed} should still be reported as {expected}"
         )
+
+
+def test_transform_replaces_the_transcript_on_the_clipboard_when_ready(
+    yada, monkeypatch
+):
+    """Fast transcript paste must not leave the later cleanup stranded in memory."""
+    from yada import app as app_module
+
+    copied: list[str] = []
+    monkeypatch.setattr(app_module, "copy", lambda text: (copied.append(text), (True, None))[1])
+    yada.settings.output.paste_mode = "after_transcription"
+    yada.settings.output.always_copy_to_clipboard = True
+
+    yada._on_finished(
+        _finished(
+            final_text="cleaned words",
+            transform=TransformOutcome(text="cleaned words"),
+        )
+    )
+
+    assert copied == ["cleaned words\n"]
+
+
+def test_tray_keeps_transcript_and_transform_as_separate_copy_targets(yada, monkeypatch):
+    from yada import app as app_module
+
+    copied: list[str] = []
+    monkeypatch.setattr(app_module, "copy", lambda text: (copied.append(text), (True, None))[1])
+    yada.tray.set_transform_enabled(True)
+    yada.tray.set_result(
+        _finished(
+            transcript="raw words",
+            final_text="cleaned words",
+            transform=TransformOutcome(text="cleaned words"),
+        )
+    )
+
+    yada.tray._action_copy_transcript.trigger()
+    yada.tray._action_copy_transform.trigger()
+
+    assert copied == ["raw words\n", "cleaned words\n"]
+
+
+def test_copy_transform_action_is_only_shown_when_transforms_are_enabled(yada):
+    yada.tray.set_transform_enabled(False)
+    assert yada.tray._action_copy_transform.isVisible() is False
+    yada.tray.set_transform_enabled(True)
+    assert yada.tray._action_copy_transform.isVisible() is True
 
 
 def test_an_error_is_reported_rather_than_swallowed(yada, qapp):

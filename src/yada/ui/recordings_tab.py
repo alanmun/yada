@@ -46,6 +46,10 @@ class WavPlayer(QObject):
         super().__init__(parent)
         self._sink = None
         self._buffer: QBuffer | None = None
+        # QAudioSink's state describes the backend at this instant, not the transport
+        # state the user selected. In particular, some backends report IdleState once
+        # they have accepted all the bytes even while the recording is still audible.
+        self._playing = False
         self._bytes_per_second = 1
         self.duration = 0.0
         self.error: str | None = None
@@ -98,11 +102,7 @@ class WavPlayer(QObject):
 
     @property
     def playing(self) -> bool:
-        if self._sink is None:
-            return False
-        from PySide6.QtMultimedia import QAudio
-
-        return self._sink.state() == QAudio.State.ActiveState
+        return self._playing
 
     def play(self) -> None:
         if self._sink is None or self._buffer is None:
@@ -115,15 +115,18 @@ class WavPlayer(QObject):
             if self._buffer.atEnd():
                 self._buffer.seek(0)
             self._sink.start(self._buffer)
+        self._playing = True
         self._timer.start()
 
     def pause(self) -> None:
         if self._sink is not None:
             self._sink.suspend()
+        self._playing = False
         self._timer.stop()
 
     def stop(self) -> None:
         self._timer.stop()
+        self._playing = False
         if self._sink is not None:
             with contextlib.suppress(Exception):
                 self._sink.stop()
@@ -160,6 +163,7 @@ class WavPlayer(QObject):
         if state in (QAudio.State.IdleState, QAudio.State.StoppedState):
             self._timer.stop()
             if self._buffer is not None and self._buffer.atEnd():
+                self._playing = False
                 self.position_changed.emit(self.duration)
                 self.finished.emit()
 
@@ -185,8 +189,11 @@ class RecordingRow(QWidget):
         self.detail = hint(recording.summary())
         self.detail.setWordWrap(True)
 
-        self.play_button = QPushButton("Play")
+        # The label changes in place, so reserve enough room for the longer one. Fixing
+        # the width from "Play" clips both ends of "Pause" with several platform styles.
+        self.play_button = QPushButton("Pause")
         self.play_button.setFixedWidth(self.play_button.sizeHint().width())
+        self.play_button.setText("Play")
         self.play_button.clicked.connect(self._toggle_play)
 
         self.scrubber = QSlider(Qt.Orientation.Horizontal)
