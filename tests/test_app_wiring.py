@@ -164,6 +164,8 @@ def test_tray_keeps_transcript_and_transform_as_separate_copy_targets(yada, monk
     yada.tray._action_copy_transform.trigger()
 
     assert copied == ["raw words\n", "cleaned words\n"]
+    assert yada.tray._action_copy_transcript.text() == "Copy last transcribe"
+    assert yada.tray._action_copy_transform.text() == "Copy last transform"
 
 
 def test_copy_transform_action_is_only_shown_when_transforms_are_enabled(yada):

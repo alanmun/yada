@@ -68,7 +68,7 @@ class TrayIcon(QObject):
         self._action_toggle = QAction("Start dictation", self._menu)
         self._action_toggle.triggered.connect(self.toggle_requested.emit)
 
-        self._action_copy_transcript = QAction("Copy last transcript", self._menu)
+        self._action_copy_transcript = QAction("Copy last transcribe", self._menu)
         self._action_copy_transcript.setEnabled(False)
         self._action_copy_transcript.triggered.connect(
             self.copy_last_transcript_requested.emit
