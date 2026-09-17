@@ -59,6 +59,11 @@ class ChimePlayer:
         # Previewed sounds are kept loaded so repeated Preview clicks stay instant, and so
         # _prune does not evict something the user is auditioning.
         self._previewed: set[Path] = set()
+        # QSoundEffect loads a newly assigned source asynchronously. Calling play() while
+        # it is still Loading is not a promise to start at Ready: on Windows it can consume
+        # the request as silence or begin partway through the sample. Remember the newest
+        # request and fire it exactly once when its effect reports that it is loaded.
+        self._pending_play: Path | None = None
         self.last_error: str | None = None
 
     # -- setup --------------------------------------------------------------------------
@@ -139,9 +144,16 @@ class ChimePlayer:
             self.last_error = f"missing sound file: {path.name}"
             return
         effect = QSoundEffect()
-        effect.setSource(QUrl.fromLocalFile(str(path)))
         effect.setVolume(self._level(path))
+        # Connect before setSource(): a small local WAV may reach Ready synchronously, and
+        # missing that transition would leave a preview waiting forever. The callback
+        # queries the effect instead of trusting a signal argument; statusChanged has no
+        # payload in Qt, and the star keeps this tolerant of binding differences.
+        effect.statusChanged.connect(
+            lambda *_, loaded_path=path: self._on_effect_status(loaded_path)
+        )
         self._effects[path] = effect
+        effect.setSource(QUrl.fromLocalFile(str(path)))
 
     def _level(self, path: Path) -> float:
         return effective_volume(self._volume, self._remainders.get(path, 1.0))
@@ -152,6 +164,8 @@ class ChimePlayer:
         for path in [p for p in self._effects if p not in in_use and p not in self._previewed]:
             self._effects.pop(path, None)
             self._remainders.pop(path, None)
+            if self._pending_play == path:
+                self._pending_play = None
 
     def _apply_volume(self) -> None:
         for path, effect in self._effects.items():
@@ -208,7 +222,35 @@ class ChimePlayer:
         effect = self._effects.get(path)
         if effect is None:
             return
+        # The latest request supersedes an older sound that is still loading. Otherwise a
+        # slow first preview can arrive after the user has already selected another sound.
+        self._pending_play = path
+        self._on_effect_status(path)
+
+    def _on_effect_status(self, path: Path) -> None:
+        """Play a requested effect only after Qt has fully loaded its decoded buffer."""
+        effect = self._effects.get(path)
+        if effect is None:
+            if self._pending_play == path:
+                self._pending_play = None
+            return
         try:
-            effect.play()  # type: ignore[attr-defined]
+            if effect.isLoaded():  # type: ignore[attr-defined]
+                if self._pending_play != path:
+                    return
+                # Clear first because play() itself may synchronously emit a status signal
+                # on some backends. A second callback must not start the sample again.
+                self._pending_play = None
+                effect.play()  # type: ignore[attr-defined]
+                return
+
+            status = effect.status()  # type: ignore[attr-defined]
+            status_name = getattr(status, "name", str(status).rsplit(".", 1)[-1])
+            if status_name == "Error":
+                if self._pending_play == path:
+                    self._pending_play = None
+                self.last_error = f"could not load sound: {path.name}"
         except Exception as exc:  # noqa: BLE001
+            if self._pending_play == path:
+                self._pending_play = None
             self.last_error = str(exc)

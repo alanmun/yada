@@ -45,6 +45,15 @@ back on its own PortAudio thread. Everything crosses boundaries as Qt signals; n
 state. This keeps the UI responsive during a slow transform and keeps the audio callback
 non-blocking, which is the one place a stall is audible.
 
+**OpenBLAS is limited to one worker before NumPy loads.** Yada uses NumPy for elementwise audio
+conversion, peak measurement and buffer reshaping; none of those operations benefit from BLAS
+worker threads. NumPy's Windows OpenBLAS build otherwise creates one worker per logical CPU and
+commits a large scratch arena for each. On a 24-thread machine, 23 unused 32 MB arenas made an
+idle packaged process consume about 821 MB private memory. `yada.__init__` sets
+`OPENBLAS_NUM_THREADS=1` unconditionally and early, reducing the same process to about 82 MB.
+An inherited system-wide value is intentionally overridden because it cannot improve yada's
+workload and would silently restore the excess allocation.
+
 ## Provider model
 
 The load-bearing abstraction. Two independent axes — a provider may implement either or both.
@@ -338,6 +347,12 @@ to detect that is different on each platform, and the differences are not incide
 Three distinct sounds — listening started, transcript ready, cleanup finished — via
 `QSoundEffect` (low-latency, short WAVs). Independently toggleable, because the transform chime
 is noise if no transform is configured.
+
+`QSoundEffect.setSource()` loads asynchronously. A play request made while its status is still
+`Loading` is not queued reliably on Windows: it can be silent or start partway through the WAV.
+The player therefore remembers the newest requested path and calls `play()` only after that
+effect reports `Ready`. A later preview supersedes an older pending one, so a slow load cannot
+produce an unexpected sound after the user has moved on.
 
 Built-ins and imported sounds are one library, addressed by id (`builtin:…`, `custom:…`) rather
 than by path: built-ins live inside the versioned install directory, which is replaced wholesale
