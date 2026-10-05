@@ -319,6 +319,8 @@ class SettingsWindow(QWidget):
 
         field = QLineEdit()
         field.setPlaceholderText("Paste your API key — it saves itself")
+        field.setToolTip("Highlight a stored key to reveal and copy it.")
+        field.selectionChanged.connect(lambda pid=spec.id: self._reveal_key(pid))
         # textEdited, not textChanged: it fires only for user input, so loading a stored
         # key into the field cannot be mistaken for entering a new one and saved back over
         # the real value.
@@ -372,6 +374,23 @@ class SettingsWindow(QWidget):
         # leaving a large empty panel under the last line of text.
         page_layout.addStretch(1)
         return holder_page
+
+    def _reveal_key(self, provider_id: str) -> None:
+        """Selecting the masked display selects the actual key, without saving it."""
+        field = self._key_fields[provider_id]
+        if not self._key_masked.get(provider_id) or not field.hasSelectedText():
+            return
+        spec = SPECS[provider_id]
+        key, _store = secrets.resolve_key(provider_id, spec.env_var)
+        # The fixed-length mask has no character-by-character mapping to the key.
+        # Select the whole value so copying or pasting over it does what users expect.
+        field.blockSignals(True)
+        try:
+            self._key_masked[provider_id] = False
+            field.setText(key or "")
+            field.selectAll()
+        finally:
+            field.blockSignals(False)
 
     def _on_key_edited(self, provider_id: str) -> None:
         """The user typed or pasted. Clear the masked display and debounce a save."""

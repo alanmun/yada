@@ -24,7 +24,10 @@ def qapp():
 
 
 @pytest.fixture
-def window(qapp):
+def window(qapp, monkeypatch):
+    from yada import secrets
+
+    monkeypatch.setattr(secrets, "resolve_key", lambda *args: (None, None))
     w = SettingsWindow(Settings())
     w.focus_tab("Providers")
     w.show()
@@ -127,3 +130,63 @@ def test_a_mirrored_pick_openrouter_does_not_carry_falls_through():
         openrouter.recommended(Modality.TEXT, ["openai/gpt-5.6-luna", "google/gemini-3.8-flash"])
         == "openai/gpt-5.6-luna"
     )
+
+
+@pytest.mark.parametrize("provider_id", list(SPECS))
+@pytest.mark.parametrize("selection", ["all", "partial", "keyboard", "mouse"])
+def test_highlighting_reveals_the_effective_key_without_saving(
+    window, qapp, monkeypatch, provider_id, selection
+):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from yada import secrets
+
+    key = "sk-example-long-secret-1234"
+    writes = []
+    monkeypatch.setattr(secrets, "resolve_key", lambda pid, env: (key, "environment"))
+    monkeypatch.setattr(secrets, "set_key", lambda *args: writes.append(args))
+    window.provider_chooser.setCurrentIndex(list(SPECS).index(provider_id))
+    window.provider_chooser.setFocus()
+    window.refresh_key_status()
+    field = window._key_fields[provider_id]
+    assert field.text() == "\u2022" * window.MASK_LENGTH + "1234"
+    field.setFocus()
+    field.deselect()
+    assert window._key_masked[provider_id]
+
+    if selection == "all":
+        field.selectAll()
+    elif selection == "partial":
+        field.setSelection(2, 3)
+    elif selection == "keyboard":
+        QTest.keyClick(field, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    else:
+        QTest.mouseDClick(field, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert field.text() == key
+    assert field.selectedText() == key
+    assert not window._key_masked[provider_id]
+    field.copy()
+    assert qapp.clipboard().text() == key
+    window.flush_pending_keys()
+    assert writes == []
+
+    # Replacing the revealed selection saves only the replacement, with no mask debris.
+    QTest.keyClicks(field, "sk-replacement")
+    window.flush_pending_keys()
+    assert writes == [(provider_id, "sk-replacement")]
+
+
+def test_highlighting_a_key_removed_from_storage_does_not_reveal_the_mask(window, monkeypatch):
+    from yada import secrets
+
+    monkeypatch.setattr(secrets, "resolve_key", lambda *args: ("sk-old-1234", "file"))
+    window.provider_chooser.setFocus()
+    window.refresh_key_status()
+    monkeypatch.setattr(secrets, "resolve_key", lambda *args: (None, None))
+    field = window._key_fields["openai"]
+    field.selectAll()
+    assert field.text() == ""
+    assert not window._key_masked["openai"]
+    assert not window._key_timers
