@@ -155,7 +155,7 @@ exe = EXE(
     strip=False,
     upx=False,  # UPX-packed binaries trip antivirus heuristics for no real size win here
     console=False,  # a tray app must not flash a console window on Windows
-    icon=None,
+    icon=str(ASSET_ROOT / "icons" / "yada.ico"),
 )
 
 coll = COLLECT(

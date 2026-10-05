@@ -58,6 +58,53 @@ def test_a_live_partial_reaches_the_overlay(yada, qapp):
     )
 
 
+def test_application_windows_and_dialogs_inherit_the_app_icon(yada, qapp):
+    from PySide6.QtWidgets import QDialog
+
+    from yada.ui.icons import APP_SIZES
+
+    icon = qapp.windowIcon()
+    assert not icon.isNull()
+    assert {size.width() for size in icon.availableSizes()} == set(APP_SIZES)
+    assert yada.overlay.windowIcon().cacheKey() == icon.cacheKey()
+    dialog = QDialog()
+    dialog.show()
+    qapp.processEvents()
+    assert dialog.windowIcon().cacheKey() == icon.cacheKey()
+    assert not dialog.windowHandle().icon().isNull()
+    dialog.close()
+
+
+def test_linux_launchers_use_an_icon_outside_version_directories(yada, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from PySide6.QtGui import QImage
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    yada.settings.start_on_login = True
+    for version in ("0.1.30", "0.1.31"):
+        executable = tmp_path / "versions" / version / "yada"
+        yada._sync_linux_integration(executable)
+        for entry in (
+            tmp_path / "data/applications/yada.desktop",
+            tmp_path / "config/autostart/yada.desktop",
+        ):
+            content = entry.read_text()
+            icon = next(
+                line.removeprefix("Icon=")
+                for line in content.splitlines()
+                if line.startswith("Icon=")
+            )
+            assert icon == str(tmp_path / "data/yada/yada.png")
+            image = QImage(icon)
+            assert not image.isNull()
+            assert image.width() == 256
+            assert str(executable) in content
+            assert "StartupWMClass=yada\n" in content
+
+
 def test_recording_shows_the_overlay_and_clears_the_last_problem(yada, qapp):
     yada.tray.set_problem("something from last time")
     yada.bridge.on_state(SessionState.RECORDING)

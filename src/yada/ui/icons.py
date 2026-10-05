@@ -19,6 +19,7 @@ from ..pipeline.session import SessionState
 
 # Rendered at these sizes so the tray always has an exact match rather than a scaled one.
 SIZES = (16, 20, 24, 32, 48, 64)
+APP_SIZES = (*SIZES, 128, 256)
 
 # Slate when idle, red while recording, amber while working. Chosen to stay distinguishable
 # for the common forms of colour blindness by differing in lightness as well as hue.
@@ -85,7 +86,11 @@ def state_icon(state: SessionState) -> QIcon:
 
 
 def app_icon() -> QIcon:
-    return state_icon(SessionState.IDLE)
+    """The stable app identity, including large task-switcher and high-DPI sizes."""
+    icon = QIcon()
+    for size in APP_SIZES:
+        icon.addPixmap(_pixmap(SessionState.IDLE, size))
+    return icon
 
 
 def all_state_icons() -> dict[SessionState, QIcon]:

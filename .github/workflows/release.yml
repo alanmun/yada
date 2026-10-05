@@ -67,6 +67,10 @@ jobs:
       - name: Build the application
         run: uv run pyinstaller --noconfirm --clean packaging/yada.spec
 
+      - name: Verify the Windows executable icon
+        if: runner.os == 'Windows'
+        run: uv run python scripts/check_windows_icon.py dist/yada/yada.exe
+
       - name: Assemble the payload
         shell: bash
         env:

@@ -55,6 +55,7 @@ from .providers.base import (
 from .providers.catalog import ModelCatalog
 from .providers.registry import SPECS, build_transcriber, build_transformer
 from .ui import enterkey, wheelguard
+from .ui.icons import app_icon
 from .ui.overlay import LiveOverlay
 from .ui.settings_window import SettingsWindow
 from .ui.theme import apply_theme
@@ -148,6 +149,9 @@ class YadaApp(QObject):
     def __init__(self, app: QApplication) -> None:
         super().__init__()
         self.app = app
+        # Inherited by every top-level window and dialog, including native taskbar
+        # thumbnails. Setting only the tray icon leaves these with the executable default.
+        app.setWindowIcon(app_icon())
         self.settings: Settings = config.load()
         # Audio of the last few dictations, so a network error at the end of one is worth
         # retrying rather than repeating. `keep` is kept in step with the setting.
@@ -295,6 +299,7 @@ class YadaApp(QObject):
             script = (
                 f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');"
                 f"$s.TargetPath='{executable}';$s.WorkingDirectory='{executable.parent}';"
+                f"$s.IconLocation='{executable},0';"
                 "$s.Description='Press a shortcut, speak, get text';$s.Save()"
             )
             with contextlib.suppress(OSError, subprocess.SubprocessError):
@@ -321,6 +326,14 @@ class YadaApp(QObject):
 
     def _sync_linux_integration(self, executable: Path) -> None:
         data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+        # A stable copy survives pruning old version directories. Both launchers and
+        # autostart entries point here, so desktops need no icon-theme cache refresh.
+        icon_path = data_home / "yada" / "yada.png"
+        with contextlib.suppress(OSError):
+            icon_path.parent.mkdir(parents=True, exist_ok=True)
+            icon_path.write_bytes(
+                (Path(__file__).parent / "assets" / "icons" / "yada.png").read_bytes()
+            )
         with contextlib.suppress(OSError):
             bin_dir = Path.home() / ".local" / "bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
@@ -336,9 +349,11 @@ class YadaApp(QObject):
             "GenericName=Dictation\n"
             "Comment=Press a shortcut, speak, get text\n"
             f"Exec={executable}\n"
+            f"Icon={icon_path}\n"
             "Terminal=false\n"
             "Categories=Utility;AudioVideo;\n"
             "StartupNotify=false\n"
+            "StartupWMClass=yada\n"
         )
         with contextlib.suppress(OSError):
             apps = data_home / "applications"
