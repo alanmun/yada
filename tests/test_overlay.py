@@ -128,3 +128,10 @@ def test_pending_work_is_separate_from_live_text(overlay, qapp):
     overlay.set_pending(0)
     assert not overlay.pending.isVisible()
     assert overlay.text.text() == "more to say"
+
+
+def test_window_title_is_what_the_kwin_placement_script_matches(overlay):
+    """On KDE Wayland this title is the only way KWin can find the overlay to place it."""
+    from yada.ui.kwin_placement import OVERLAY_TITLE
+
+    assert overlay.windowTitle() == OVERLAY_TITLE

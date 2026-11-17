@@ -24,6 +24,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from .kwin_placement import OVERLAY_TITLE
+
 # How long the finished transcript stays on screen before the panel disappears.
 LINGER_MS = 2500
 # A long dictation would otherwise grow the panel without limit.
@@ -44,6 +46,9 @@ class LiveOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Never shown, but it is how KWin's placement script recognises this window: on
+        # Wayland the compositor, not move(), decides where it goes. See kwin_placement.
+        self.setWindowTitle(OVERLAY_TITLE)
 
         self.status = QLabel("")
         status_font = QFont(self.font())
@@ -147,6 +152,7 @@ class LiveOverlay(QWidget):
         width = min(max(self.sizeHint().width(), 360), int(available.width() * 0.6))
         self.setFixedWidth(width)
         self.adjustSize()
+        # Ignored on Wayland, where kwin_placement does the same sum inside KWin.
         x = available.center().x() - self.width() // 2
         y = available.bottom() - self.height() - max(24, int(available.height() * 0.06))
         self.move(x, y)

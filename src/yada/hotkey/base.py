@@ -65,6 +65,32 @@ _KEY_TABLE: dict[str, tuple[int, str]] = {
 }
 
 
+# What Shift turns each unshifted key into on a US layout, as XKB keysym names.
+_US_SHIFTED: dict[str, str] = {
+    ";": "colon",
+    "'": "quotedbl",
+    ",": "less",
+    ".": "greater",
+    "/": "question",
+    "\\": "bar",
+    "[": "braceleft",
+    "]": "braceright",
+    "-": "underscore",
+    "=": "plus",
+    "`": "asciitilde",
+    "1": "exclam",
+    "2": "at",
+    "3": "numbersign",
+    "4": "dollar",
+    "5": "percent",
+    "6": "asciicircum",
+    "7": "ampersand",
+    "8": "asterisk",
+    "9": "parenleft",
+    "0": "parenright",
+}
+
+
 class InvalidCombo(ValueError):
     """The combo string could not be parsed. Message is safe to show the user."""
 
@@ -168,19 +194,27 @@ class Combo:
             return ord(self.key.upper())
         raise InvalidCombo(f"No virtual-key code for {self.key!r}.")
 
-    def to_xdg(self) -> str:
-        """Trigger string for the XDG GlobalShortcuts portal, e.g. 'CTRL+SHIFT+semicolon'."""
+    def to_xdg(self, *, fold_shift: bool = False) -> str:
+        """Trigger string for the XDG GlobalShortcuts portal, e.g. 'CTRL+SHIFT+semicolon'.
+
+        `fold_shift` is for KDE. KWin matches a press by the symbol it types, so holding
+        Shift on ';' arrives as Ctrl+':' and a stored Ctrl+Shift+; never fires. Folding
+        asks for the shifted symbol instead -- 'CTRL+colon' -- which is the form KDE's own
+        shortcut editor records for the same keys. The pairs assume a US layout, as the
+        combo syntax already does.
+        """
+        shifted = _US_SHIFTED.get(self.key) if fold_shift and self.shift else None
         mods = [
             name
             for name, on in (
                 ("CTRL", self.ctrl),
-                ("SHIFT", self.shift),
+                ("SHIFT", self.shift and shifted is None),
                 ("ALT", self.alt),
                 ("SUPER", self.meta),
             )
             if on
         ]
-        return "+".join([*mods, self._xkb()])
+        return "+".join([*mods, shifted or self._xkb()])
 
     def _xkb(self) -> str:
         if entry := _KEY_TABLE.get(self.key):

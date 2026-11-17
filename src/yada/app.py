@@ -54,7 +54,7 @@ from .providers.base import (
 )
 from .providers.catalog import ModelCatalog
 from .providers.registry import SPECS, build_transcriber, build_transformer
-from .ui import enterkey, wheelguard
+from .ui import enterkey, kwin_placement, wheelguard
 from .ui.icons import app_icon
 from .ui.overlay import LiveOverlay
 from .ui.settings_window import SettingsWindow
@@ -163,6 +163,7 @@ class YadaApp(QObject):
         self.paste_backend = create_paste_backend()
         self.settings_window: SettingsWindow | None = None
         self._hotkey = None
+        self._kwin_placement = False
         self._session_state = SessionState.IDLE
         # An AudioCapture opened only while the settings meter is running.
         self._level_capture: AudioCapture | None = None
@@ -219,6 +220,7 @@ class YadaApp(QObject):
         self._sync_provider_capabilities()
         self._apply_notification_setting()
         self._start_hotkey()
+        self._place_overlay_with_kwin()
         # On its own thread rather than the loop: PortAudio initialisation is blocking C
         # code, and the point is to keep it away from anything that is being waited on.
         threading.Thread(target=warm_up_audio, name="yada-audio-warmup", daemon=True).start()
@@ -542,6 +544,21 @@ class YadaApp(QObject):
         self.tray.notifications_enabled = self.settings.output.show_notifications
         self.overlay.set_enabled(self.settings.output.show_overlay)
 
+    def _place_overlay_with_kwin(self) -> None:
+        """On KDE Wayland, let KWin put the overlay bottom-centre; yada cannot."""
+        if not kwin_placement.kde_wayland_session():
+            return
+        self._kwin_placement = True
+        future = asyncio.run_coroutine_threadsafe(kwin_placement.install(), self.loop)
+
+        def report(done) -> None:
+            with contextlib.suppress(Exception):
+                if problem := done.result():
+                    # Placement only: the overlay still works, just KWin-centred.
+                    print(f"yada: overlay placement unavailable: {problem}")
+
+        future.add_done_callback(report)
+
     def _start_hotkey(self) -> None:
         try:
             combo = Combo.parse(self.settings.hotkey.combo)
@@ -832,6 +849,11 @@ class YadaApp(QObject):
         self._stop_level_capture()
         with contextlib.suppress(Exception):
             self.overlay.dismiss()
+        if self._kwin_placement:
+            with contextlib.suppress(Exception):
+                asyncio.run_coroutine_threadsafe(kwin_placement.uninstall(), self.loop).result(
+                    timeout=1.0
+                )
         if self._hotkey is not None:
             with contextlib.suppress(Exception):
                 self._hotkey.stop()

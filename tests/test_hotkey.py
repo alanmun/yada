@@ -44,6 +44,19 @@ def test_semicolon_renders_correctly_for_each_platform():
     assert c.to_xdg() == "CTRL+SHIFT+semicolon", "XKB calls it 'semicolon'"
 
 
+def test_kde_trigger_names_the_shifted_symbol():
+    """KWin matches Ctrl+Shift+; as Ctrl+':', so a stored Ctrl+Shift+; never fires."""
+    assert Combo.parse("ctrl+shift+;").to_xdg(fold_shift=True) == "CTRL+colon"
+    assert Combo.parse("ctrl+shift+1").to_xdg(fold_shift=True) == "CTRL+exclam"
+    assert Combo.parse("ctrl+shift+alt+/").to_xdg(fold_shift=True) == "CTRL+ALT+question"
+
+
+def test_kde_trigger_keeps_shift_where_nothing_folds():
+    assert Combo.parse("ctrl+shift+d").to_xdg(fold_shift=True) == "CTRL+SHIFT+d"
+    assert Combo.parse("ctrl+;").to_xdg(fold_shift=True) == "CTRL+semicolon"
+    assert Combo.parse("shift+f5").to_xdg(fold_shift=True) == "SHIFT+F5"
+
+
 def test_function_keys():
     c = Combo.parse("alt+f5")
     assert c.to_win32()[1] == 0x74  # VK_F5

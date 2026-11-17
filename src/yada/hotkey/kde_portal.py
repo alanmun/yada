@@ -53,6 +53,10 @@ def wayland_session() -> bool:
     return os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
 
 
+def kde_session() -> bool:
+    return "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper().split(":")
+
+
 class KdePortalHotkeyBackend:
     """Registers the shortcut with the compositor. Runs on the app's asyncio loop."""
 
@@ -221,7 +225,9 @@ class KdePortalHotkeyBackend:
                         # A *preferred* trigger: the compositor may assign something else,
                         # or the user may change it. yada follows whatever it ends up as,
                         # because the compositor is the source of truth once bound.
-                        "preferred_trigger": Variant("s", self._combo.to_xdg()),
+                        "preferred_trigger": Variant(
+                            "s", self._combo.to_xdg(fold_shift=kde_session())
+                        ),
                     },
                 )
             ],
