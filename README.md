@@ -6,6 +6,10 @@ Press a shortcut, speak, get text. Optionally use transformations to have an LLM
 
 For Windows and Linux: Lives in the system tray on Windows 11 and KDE Plasma.
 
+Have more to say? Press the shortcut to record again immediately, even while the previous
+dictation is still transcribing or cleaning up. Results are delivered in the order you
+recorded them. The listening panel shows when earlier dictations are still finishing.
+
 ```
 Ctrl+Shift+;  ──▶  🔴 recording  ──▶  Ctrl+Shift+;  ──▶  ♪ transcript  ──▶  ♪ cleaned up
                     (streaming as you speak)              chime 1              chime 2

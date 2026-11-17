@@ -1,8 +1,7 @@
 """The dictation state machine.
 
-    IDLE ──toggle──> RECORDING ──toggle──> TRANSCRIBING ──> TRANSFORMING ──> IDLE
-                                                 │                │
-                                                 └── chime 1      └── chime 2
+    Each dictation: RECORDING -> TRANSCRIBING -> TRANSFORMING -> done.
+    The microphone can start another dictation while earlier work finishes.
 
 Deliberately free of Qt and of provider construction: everything it needs arrives through
 `SessionDeps`, which makes the whole flow testable with fakes and no audio hardware.
@@ -23,7 +22,8 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -90,6 +90,7 @@ class SessionDeps:
     # Where finished recordings go, so a failed transcription can be retried instead of
     # repeated. None disables keeping any.
     recordings: RecordingStore | None = None
+    pending_changed: Callable[[int], None] = lambda _count: None
 
 
 # How long a stop will wait for a socket that is still opening. Long enough to cover a slow
@@ -102,6 +103,164 @@ UPLOAD_DRAIN_TIMEOUT = 30.0
 
 
 class DictationSession:
+    """One microphone, independent dictations, and output in recording order.
+
+    Each stopped run owns its buffer and live socket until processing finishes. A new
+    shortcut press never waits for that work. Only output/cleanup waits for the preceding
+    run, so later transcription can proceed without reversing pastes or clipboard writes.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, deps: SessionDeps) -> None:
+        self._loop = loop
+        self._deps = deps
+        self._active: _DictationRun | None = None
+        self._pending: dict[_DictationRun, asyncio.Task] = {}
+        self._state = SessionState.IDLE
+        self._store_lock = asyncio.Lock()
+        self._closing = False
+
+    @property
+    def state(self) -> SessionState:
+        return self._state
+
+    def _refresh(self) -> None:
+        if self._active is not None:
+            state = self._active.state
+        else:
+            state = next(
+                (run.state for run in self._pending if run.state is not SessionState.IDLE),
+                SessionState.IDLE,
+            )
+        if state is not self._state:
+            self._state = state
+            self._deps.events.on_state(state)
+        self._deps.pending_changed(
+            sum(run.state is not SessionState.IDLE for run in self._pending)
+            if self._active is not None else 0
+        )
+
+    def _new_run(self) -> _DictationRun:
+        # Snapshot settings and providers so a later edit cannot change a queued dictation.
+        settings = deepcopy(self._deps.settings())
+        transcriber = self._deps.transcriber()
+        events = _RunEvents(self)
+        run = _DictationRun(self._loop, replace(
+            self._deps,
+            settings=lambda: settings,
+            transcriber=lambda: transcriber,
+            transformer=lambda: None,
+            events=events,
+        ))
+        events.run = run
+        run.store_lock = self._store_lock
+        return run
+
+    def toggle(self) -> None:
+        """Thread-safe entry point for shortcuts, tray actions, and IPC."""
+        asyncio.run_coroutine_threadsafe(self.toggle_async(), self._loop)
+
+    async def toggle_async(self) -> None:
+        if self._closing:
+            return
+        if self._active is None:
+            run = self._new_run()
+            self._active = run
+            await run._start()
+            if run.state is SessionState.RECORDING:
+                # Provider/keyring setup for cleanup must not delay the listening chime.
+                transformer = self._deps.transformer()
+                run._deps.transformer = lambda: transformer
+            else:
+                self._active = None
+                self._refresh()
+            return
+
+        run, self._active = self._active, None
+        run._stop_capture()
+        run.previous = next(reversed(self._pending.values()), None)
+        task = asyncio.create_task(self._process(run))
+        self._pending[run] = task
+        run._set_state(SessionState.TRANSCRIBING)
+        # Awaiting a stop remains useful to CLI callers and tests. Subsequent toggles run
+        # independently on the same loop and can open the microphone immediately.
+        await asyncio.shield(task)
+
+    async def _process(self, run: _DictationRun) -> None:
+        try:
+            await run._stop_and_process()
+        except Exception as exc:  # noqa: BLE001 - one failed run cannot block later output
+            await run._abort_stream()
+            run._reset()
+            self._deps.events.on_error(f"Dictation failed: {exc}")
+        finally:
+            self._pending.pop(run, None)
+            self._refresh()
+
+    async def retry_last(self, *, deliver: bool = True) -> str:
+        return await self.retry(None, deliver=deliver)
+
+    async def retry(self, recording_id: str | None = None, *, deliver: bool = True) -> str:
+        if self._closing:
+            return ""
+        if self._active is not None or self._pending:
+            self._deps.events.on_warning("Still finishing the last dictation…")
+            return ""
+        run = self._new_run()
+        task = asyncio.create_task(self._retry_run(run, recording_id, deliver=deliver))
+        self._pending[run] = task
+        return await asyncio.shield(task)
+
+    async def _retry_run(
+        self, run: _DictationRun, recording_id: str | None, *, deliver: bool,
+    ) -> str:
+        try:
+            return await run.retry(recording_id, deliver=deliver)
+        finally:
+            self._pending.pop(run, None)
+            self._refresh()
+
+    async def shutdown(self) -> None:
+        self._closing = True
+        runs = list(self._pending)
+        tasks = list(self._pending.values())
+        if self._active is not None:
+            self._active._stop_capture()
+            runs.append(self._active)
+            self._active = None
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for run in runs:
+            await run.shutdown()
+        self._pending.clear()
+        self._refresh()
+
+
+class _RunEvents:
+    """Only the current microphone owner may publish live text."""
+
+    def __init__(self, owner: DictationSession) -> None:
+        self.owner = owner
+        self.run: _DictationRun
+
+    def on_state(self, state: SessionState) -> None:
+        self.owner._refresh()
+
+    def on_partial(self, text: str) -> None:
+        if self.owner._active is self.run:
+            self.owner._deps.events.on_partial(text)
+
+    def on_finished(self, result: SessionResult) -> None:
+        self.owner._deps.events.on_finished(result)
+
+    def on_error(self, message: str) -> None:
+        self.owner._deps.events.on_error(message)
+
+    def on_warning(self, message: str) -> None:
+        self.owner._deps.events.on_warning(message)
+
+
+class _DictationRun:
     def __init__(self, loop: asyncio.AbstractEventLoop, deps: SessionDeps) -> None:
         self._loop = loop
         self._deps = deps
@@ -119,7 +278,13 @@ class DictationSession:
         self._partial = ""
         self._transcription_result: TranscriptionResult | None = None
         self._started_at = 0.0
+        self._duration_seconds = 0.0
+        self._capture_warnings: list[str] = []
         self._busy = asyncio.Lock()
+        self.previous: asyncio.Task | None = None
+        self.store_lock = asyncio.Lock()
+        self._recorded_at = now_iso()
+        self._recording_id = new_recording_id()
 
     @property
     def state(self) -> SessionState:
@@ -128,31 +293,6 @@ class DictationSession:
     def _set_state(self, state: SessionState) -> None:
         self._state = state
         self._deps.events.on_state(state)
-
-    # -- entry point --------------------------------------------------------------------
-
-    def toggle(self) -> None:
-        """Thread-safe. Called from the hotkey thread, the tray, and the IPC server."""
-        asyncio.run_coroutine_threadsafe(self.toggle_async(), self._loop)
-
-    async def toggle_async(self) -> None:
-        if self._state is SessionState.IDLE:
-            await self._start()
-        elif self._state is SessionState.RECORDING:
-            try:
-                await self._stop_and_process()
-            except Exception as exc:  # noqa: BLE001 - the app must stay usable regardless
-                # Without this the session stays on TRANSCRIBING for good: every later
-                # keypress is answered with "Still finishing the last dictation…" and the
-                # only way out is to restart yada. One lost dictation is the right price.
-                await self._abort_stream()
-                self._reset()
-                self._deps.events.on_error(f"Dictation failed: {exc}")
-        else:
-            # Ignoring rather than queueing: starting a second recording while the first is
-            # still being transcribed would need two independent pipelines, and the wait is
-            # normally a second or two. Revisit if that turns out to grate.
-            self._deps.events.on_warning("Still finishing the last dictation…")
 
     # -- recording ----------------------------------------------------------------------
 
@@ -278,18 +418,22 @@ class DictationSession:
 
     # -- stop and process ---------------------------------------------------------------
 
+    def _stop_capture(self) -> None:
+        # Release the microphone before scheduling processing. Even another toggle already
+        # queued on the loop must never open a second capture alongside this one.
+        self._duration_seconds = time.monotonic() - self._started_at
+        if self._capture is not None:
+            self._capture.stop()
+            if self._capture.last_error:
+                self._capture_warnings.append(f"Audio warning: {self._capture.last_error}")
+            self._capture = None
+
     async def _stop_and_process(self) -> None:
         if self._busy.locked():
             return
         async with self._busy:
-            warnings: list[str] = []
-            duration = time.monotonic() - self._started_at
-
-            if self._capture is not None:
-                self._capture.stop()
-                if self._capture.last_error:
-                    warnings.append(f"Audio warning: {self._capture.last_error}")
-                self._capture = None
+            warnings = list(self._capture_warnings)
+            duration = self._duration_seconds
 
             buffer = self._buffer
             if buffer is None or buffer.is_empty:
@@ -300,7 +444,6 @@ class DictationSession:
             if buffer.truncated:
                 warnings.append("Recording hit the length cap and was truncated.")
 
-            self._set_state(SessionState.TRANSCRIBING)
             transcript, streamed, stt_warnings = await self._transcribe(buffer)
             warnings.extend(stt_warnings)
 
@@ -309,6 +452,10 @@ class DictationSession:
             # have finished speaking, so the audio is always complete by this point --
             # discarding it was throwing away a recording that was already good.
             await self._remember(buffer, duration, transcript, streamed, warnings)
+
+            # Transcription can overlap earlier work; output and cleanup keep speech order.
+            if self.previous is not None:
+                await asyncio.shield(self.previous)
 
             if not transcript:
                 self._reset()
@@ -373,8 +520,8 @@ class DictationSession:
             model = self._transcription_result.model
             provider = self._transcription_result.provider
         entry = Recording(
-            id=new_recording_id(),
-            recorded_at=now_iso(),
+            id=self._recording_id,
+            recorded_at=self._recorded_at,
             duration_seconds=round(duration, 2),
             transcript=transcript,
             error="" if transcript else " ".join(warnings).strip(),
@@ -384,7 +531,8 @@ class DictationSession:
         )
         with contextlib.suppress(Exception):
             wav = await asyncio.to_thread(buffer.to_wav)
-            await asyncio.to_thread(store.add, wav, entry)
+            async with self.store_lock:
+                await asyncio.to_thread(store.add, wav, entry)
 
     async def retry_last(self, *, deliver: bool = True) -> str:
         """Transcribe the most recent recording again. What holding the shortcut does."""
@@ -453,15 +601,16 @@ class DictationSession:
                 return ""
 
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(
-                    store.update,
-                    latest.id,
-                    transcript=text,
-                    error="",
-                    model=result.model,
-                    provider=result.provider,
-                    streamed=False,
-                )
+                async with self.store_lock:
+                    await asyncio.to_thread(
+                        store.update,
+                        latest.id,
+                        transcript=text,
+                        error="",
+                        model=result.model,
+                        provider=result.provider,
+                        streamed=False,
+                    )
 
             self._deps.chime(Stage.TRANSCRIPTION)
             settings = self._deps.settings()
@@ -567,7 +716,7 @@ class DictationSession:
             return
         try:
             await asyncio.wait_for(task, timeout=STREAM_CONNECT_GRACE)
-        except (TimeoutError, asyncio.CancelledError):
+        except TimeoutError:
             # wait_for has already cancelled it.
             warnings.append("The live connection did not finish opening in time.")
         except Exception:  # noqa: BLE001 - it reports its own failure as a warning

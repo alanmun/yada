@@ -239,7 +239,7 @@ async def test_empty_recording_makes_no_api_call(fake_audio):
     await sess.toggle_async()
     fake_audio.instances[-1].frames_to_send = 0
     # Drop the audio that was already buffered to simulate a double-tap of the hotkey.
-    sess._buffer.clear()
+    sess._active._buffer.clear()
     await sess.toggle_async()
     assert stt.batch_calls == 0, "a zero-length recording must not be uploaded"
     assert rec.chimes == [Stage.LISTENING], "it did start listening, so that chime is right"
@@ -247,12 +247,6 @@ async def test_empty_recording_makes_no_api_call(fake_audio):
     assert sess.state is SessionState.IDLE
 
 
-async def test_toggle_while_processing_warns(fake_audio):
-    sess, rec, _ = build(transcriber=FakeTranscriber())
-    await sess.toggle_async()
-    sess._state = SessionState.TRANSCRIBING
-    await sess.toggle_async()
-    assert any("Still finishing" in w for w in rec.warnings)
 
 
 # --------------------------------------------------------------------------------------
@@ -768,3 +762,205 @@ async def test_openai_live_timeout_recovers_with_file_model(monkeypatch, store):
     assert any("did not finish opening" in w for w in rec.finished[0].warnings)
     assert await sess.retry_last(deliver=False) == "Recovered the recording"
     assert store.entries()[0].model == "gpt-transcribe"
+
+
+class GatedTranscriber(FakeTranscriber):
+    """Two requests that tests can finish in either order, without timing guesses."""
+
+    def __init__(self):
+        super().__init__()
+        self.started = [asyncio.Event(), asyncio.Event()]
+        self.release = [asyncio.Event(), asyncio.Event()]
+
+    async def transcribe(self, wav_bytes, opts):
+        index = self.batch_calls
+        self.batch_calls += 1
+        self.started[index].set()
+        await self.release[index].wait()
+        return TranscriptionResult(text=("first", "second")[index], model="m", provider="fake")
+
+
+@pytest.mark.parametrize("paste_mode", ["off", "after_transcription", "after_transformation"])
+async def test_new_recording_is_immediate_and_results_keep_speech_order(paste_mode, store):
+    stt = GatedTranscriber()
+    settings = Settings(output=OutputSettings(paste_mode=paste_mode))
+    sess, rec, _ = build(settings=settings, transcriber=stt, recordings=store)
+    await sess.toggle_async()
+    first_stop = asyncio.create_task(sess.toggle_async())
+    await asyncio.wait_for(stt.started[0].wait(), 1)
+    assert not FakeCapture.instances[0].started
+
+    # No extra confirmation or release of the preceding request is needed to listen.
+    await asyncio.wait_for(sess.toggle_async(), 1)
+    assert sess.state is SessionState.RECORDING
+    assert FakeCapture.instances[1].started
+    assert rec.chimes.count(Stage.LISTENING) == 2
+    second_stop = asyncio.create_task(sess.toggle_async())
+    await asyncio.wait_for(stt.started[1].wait(), 1)
+
+    stt.release[1].set()
+    # The second transcript is saved, proving it processed while the first was blocked.
+    for _ in range(1000):
+        if store.entries():
+            break
+        await asyncio.sleep(0.001)
+    assert store.entries()[0].transcript == "second"
+    assert rec.finished == []
+    assert rec.delivered == []
+
+    stt.release[0].set()
+    await asyncio.wait_for(asyncio.gather(first_stop, second_stop), 2)
+    assert [r.transcript for r in rec.finished] == ["first", "second"]
+    assert [r.transcript for r in store.entries()] == ["second", "first"]
+    expected = [] if paste_mode == "off" else ["first", "second"]
+    assert [text for text, _ in rec.delivered] == expected
+    assert sess.state is SessionState.IDLE
+    assert rec.errors == []
+
+
+async def test_cleanup_completion_does_not_stop_the_next_recording():
+    class GatedTransformer(FakeTransformer):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def transform(self, system, user, opts):
+            self.started.set()
+            await self.release.wait()
+            return await super().transform(system, user, opts)
+
+    transform = GatedTransformer()
+    settings = Settings()
+    settings.transform.enabled = True
+    settings.transform.steps = [TransformStep(type="prompt_transform")]
+    sess, rec, _ = build(
+        settings=settings, transcriber=FakeTranscriber(), transformer=transform,
+    )
+    pending_counts = []
+    sess._deps.pending_changed = pending_counts.append
+    await sess.toggle_async()
+    stop = asyncio.create_task(sess.toggle_async())
+    await asyncio.wait_for(transform.started.wait(), 1)
+    await asyncio.wait_for(sess.toggle_async(), 1)
+    capture = FakeCapture.instances[-1]
+    assert sess.state is SessionState.RECORDING
+    assert pending_counts[-1] == 1
+    states_before = list(rec.states)
+
+    transform.release.set()
+    await asyncio.wait_for(stop, 1)
+    assert rec.finished[0].final_text == "TRANSFORMED"
+    assert sess.state is SessionState.RECORDING
+    assert rec.states == states_before, "background completion cannot reset listening"
+    assert capture.started
+    assert pending_counts[-1] == 0
+    await sess.shutdown()
+
+
+async def test_shutdown_cancels_pending_work_without_late_output():
+    stt = GatedTranscriber()
+    sess, rec, _ = build(transcriber=stt)
+    await sess.toggle_async()
+    stop = asyncio.create_task(sess.toggle_async())
+    await asyncio.wait_for(stt.started[0].wait(), 1)
+    await sess.toggle_async()
+    await asyncio.wait_for(sess.shutdown(), 1)
+    await asyncio.gather(stop, return_exceptions=True)
+    stt.release[0].set()
+    await asyncio.sleep(0)
+    assert not any(capture.started for capture in FakeCapture.instances)
+    assert rec.finished == []
+    assert rec.delivered == []
+    assert sess.state is SessionState.IDLE
+
+
+async def test_failed_earlier_dictation_does_not_block_the_next():
+    class FailingFirst(GatedTranscriber):
+        async def transcribe(self, wav_bytes, opts):
+            index = self.batch_calls
+            result = await super().transcribe(wav_bytes, opts)
+            if index == 0:
+                raise RuntimeError("first request failed")
+            return result
+
+    stt = FailingFirst()
+    settings = Settings(output=OutputSettings(paste_mode="after_transcription"))
+    sess, rec, _ = build(settings=settings, transcriber=stt)
+    await sess.toggle_async()
+    first = asyncio.create_task(sess.toggle_async())
+    await asyncio.wait_for(stt.started[0].wait(), 1)
+    await sess.toggle_async()
+    second = asyncio.create_task(sess.toggle_async())
+    await asyncio.wait_for(stt.started[1].wait(), 1)
+    stt.release[1].set()
+    stt.release[0].set()
+    await asyncio.wait_for(asyncio.gather(first, second), 1)
+    assert any("first request failed" in error for error in rec.errors)
+    assert [text for text, _ in rec.delivered] == ["second"]
+    assert sess.state is SessionState.IDLE
+
+
+async def test_previous_live_stream_cannot_publish_into_new_recording():
+    class LateStream(FakeStream):
+        def __init__(self):
+            super().__init__(final="first")
+            self.finishing = asyncio.Event()
+            self.release = asyncio.Event()
+            self.late_delta = asyncio.Event()
+            self.delta_sent = asyncio.Event()
+
+        async def deltas(self):
+            yield "first live"
+            await self.late_delta.wait()
+            yield " old recording"
+            self.delta_sent.set()
+
+        async def finish(self):
+            self.finishing.set()
+            await self.release.wait()
+            return await super().finish()
+
+    first_stream = LateStream()
+    second_stream = FakeStream(deltas=["second live"], final="second")
+
+    class Streams(FakeTranscriber):
+        async def open_stream(self, opts):
+            return streams.pop(0)
+
+    streams = [first_stream, second_stream]
+    sess, rec, _ = build(transcriber=Streams(streaming=True))
+    await sess.toggle_async()
+    first = asyncio.create_task(sess.toggle_async())
+    await asyncio.wait_for(first_stream.finishing.wait(), 1)
+    await sess.toggle_async()
+    await asyncio.sleep(0)  # open the second stream
+    await asyncio.sleep(0)  # read its live deltas
+    assert rec.partials[-1] == "second live"
+    partials = list(rec.partials)
+    first_stream.late_delta.set()
+    await asyncio.wait_for(first_stream.delta_sent.wait(), 1)
+    assert rec.partials == partials, "late words from A cannot appear in B's overlay"
+    first_stream.release.set()
+    await asyncio.wait_for(first, 1)
+    assert sess.state is SessionState.RECORDING
+    await sess.toggle_async()
+    assert [result.transcript for result in rec.finished] == ["first", "second"]
+    assert all(result.streamed for result in rec.finished)
+
+
+async def test_already_queued_shortcuts_release_microphone_before_reopening(monkeypatch):
+    original_start = FakeCapture.start
+
+    def exclusive_start(capture):
+        assert not any(other.started for other in FakeCapture.instances if other is not capture)
+        original_start(capture)
+
+    monkeypatch.setattr(FakeCapture, "start", exclusive_start)
+    sess, rec, _ = build(transcriber=FakeTranscriber())
+    await asyncio.gather(*(sess.toggle_async() for _ in range(3)))
+    assert len(FakeCapture.instances) == 2
+    assert sess.state is SessionState.RECORDING
+    assert len(rec.finished) == 1
+    assert rec.states.count(SessionState.RECORDING) == 2, "each recording resets the overlay"
+    await sess.shutdown()

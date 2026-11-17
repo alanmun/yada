@@ -588,6 +588,25 @@ Also: builds are pinned to a uv-managed interpreter (`python-preference = "only-
 Distro system pythons frequently ship without `libpython3.x.so`, which PyInstaller requires
 to build a bootloader, and the resulting error names a package rather than the real cause.
 
+## Back-to-back dictation
+
+`DictationSession` coordinates one microphone owner and independent `_DictationRun`
+instances. Stopping releases the microphone before scheduling processing; another shortcut
+press starts a fresh run immediately, even during transcription or cleanup. Each run owns
+its audio buffer, socket tasks, and a snapshot of its settings and providers.
+
+Transcription overlaps, but a run waits for the preceding processing task before cleanup,
+pasting, and completion. This preserves both paste order and clipboard order, including
+when “paste after transcription” is followed by a later clipboard copy of cleaned text.
+A failed run releases its turn so subsequent dictations can finish. Shutdown cancels and
+awaits pending work before tearing down its sockets.
+
+The recording run controls visible state and live partials. Background completions can
+update the tray's last result and report problems without dismissing the active overlay,
+replacing its live words, or starting its hide timer. A separate pending count shows how
+many earlier dictations are finishing. Recording history uses capture order rather than
+request completion order, and a shared lock serializes index writes from overlapping runs.
+
 ## Layout
 
 ```

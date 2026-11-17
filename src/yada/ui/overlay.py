@@ -60,6 +60,11 @@ class LiveOverlay(QWidget):
         layout.addWidget(self.status)
         layout.addWidget(self.text)
 
+        self.pending = QLabel("")
+        self.pending.setWordWrap(True)
+        self.pending.hide()
+        layout.addWidget(self.pending)
+
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.dismiss)
@@ -83,6 +88,15 @@ class LiveOverlay(QWidget):
 
     def set_status(self, status: str) -> None:
         self.status.setText(status)
+        if self.isVisible():
+            self._present()
+
+    def set_pending(self, count: int) -> None:
+        self.pending.setText(
+            "Finishing previous dictation…" if count == 1
+            else f"Finishing {count} previous dictations…"
+        )
+        self.pending.setVisible(count > 0)
         if self.isVisible():
             self._present()
 

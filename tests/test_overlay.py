@@ -113,3 +113,18 @@ def test_whitespace_is_collapsed():
 def test_empty_text_is_harmless():
     assert _tail("") == ""
     assert _tail(None) == ""
+
+
+def test_pending_work_is_separate_from_live_text(overlay, qapp):
+    overlay.begin()
+    overlay.set_pending(2)
+    overlay.set_partial("more to say")
+    qapp.processEvents()
+    assert overlay.pending.isVisible()
+    assert overlay.pending.text() == "Finishing 2 previous dictations…"
+    assert overlay.text.text() == "more to say"
+    overlay.set_pending(1)
+    assert overlay.pending.text() == "Finishing previous dictation…"
+    overlay.set_pending(0)
+    assert not overlay.pending.isVisible()
+    assert overlay.text.text() == "more to say"

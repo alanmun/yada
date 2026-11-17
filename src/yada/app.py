@@ -98,6 +98,7 @@ class EventBridge(QObject):
 
     state = Signal(object)
     partial = Signal(str)
+    pending = Signal(int)
     finished = Signal(object)
     error = Signal(str)
     warning = Signal(str)
@@ -162,6 +163,7 @@ class YadaApp(QObject):
         self.paste_backend = create_paste_backend()
         self.settings_window: SettingsWindow | None = None
         self._hotkey = None
+        self._session_state = SessionState.IDLE
         # An AudioCapture opened only while the settings meter is running.
         self._level_capture: AudioCapture | None = None
         self._ipc: ipc.CommandServer | None = None
@@ -182,6 +184,7 @@ class YadaApp(QObject):
                 chime=self._chime,
                 deliver=self.bridge.deliver_requested.emit,
                 recordings=self.recordings,
+                pending_changed=self.bridge.pending.emit,
             ),
         )
 
@@ -405,6 +408,9 @@ class YadaApp(QObject):
             self._push_recordings, Qt.ConnectionType.QueuedConnection
         )
         self.bridge.audio_level.connect(self._on_audio_level, Qt.ConnectionType.QueuedConnection)
+        self.bridge.pending.connect(
+            self.overlay.set_pending, Qt.ConnectionType.QueuedConnection
+        )
         self.bridge.partial.connect(self.overlay.set_partial, Qt.ConnectionType.QueuedConnection)
         self.bridge.provider_test_result.connect(
             self._on_provider_test_result, Qt.ConnectionType.QueuedConnection
@@ -448,11 +454,14 @@ class YadaApp(QObject):
         does. A dictation that never shows live text is therefore visibly not live -- a
         distinction that could not be made from outside the app at all before.
         """
+        self._session_state = state
         if state is SessionState.RECORDING:
             self.tray.set_problem(None)
             self.overlay.begin()
         elif state is SessionState.TRANSCRIBING:
             self.overlay.set_status("Finishing…")
+        elif state is SessionState.TRANSFORMING:
+            self.overlay.set_status("Cleaning up…")
         if state is not SessionState.IDLE and self._level_capture is not None:
             self._stop_level_capture()
             if self.settings_window is not None:
@@ -1039,7 +1048,6 @@ class YadaApp(QObject):
                 self.tray.notify("Copy failed", error or "unknown error", warning=True)
 
     def _on_finished(self, result: SessionResult) -> None:
-        self.tray.set_state(SessionState.IDLE)
         self.tray.set_result(result)
         # "Paste after transcription" deliberately delivers the fast first result, but
         # cleanup finishes later. Keep the default clipboard-copy promise by replacing
@@ -1058,14 +1066,16 @@ class YadaApp(QObject):
         if result.warnings:
             # A warning has to be read, so the panel stays up carrying it.
             self.tray.set_problem(" ".join(result.warnings))
-            self.overlay.finish(result.final_text, status=result.warnings[0])
+            if self._session_state is SessionState.IDLE:
+                self.overlay.finish(result.final_text, status=result.warnings[0])
         else:
             # Nothing to report, so the panel goes. The transcription chime has already
             # confirmed it finished; a "Done" line afterwards is a second confirmation of
             # something the user has just heard, and it outstays its welcome on screen.
             # Whether the transcript came from the live socket or an upload is still on the
             # tray tooltip, next to the word count and duration.
-            self.overlay.dismiss()
+            if self._session_state is SessionState.IDLE:
+                self.overlay.dismiss()
         for warning in result.warnings:
             self.tray.notify("yada", warning, warning=True)
 
@@ -1073,9 +1083,9 @@ class YadaApp(QObject):
     NOT_CONFIGURED = "NOT_CONFIGURED: "
 
     def _on_error(self, message: str) -> None:
-        self.tray.set_state(SessionState.IDLE)
         self.tray.set_problem(message)
-        self.overlay.report(message)
+        if self._session_state is SessionState.IDLE:
+            self.overlay.report(message)
         if message.startswith(self.NOT_CONFIGURED):
             # Show the window rather than a notification nobody will see, and land on the
             # tab that fixes it. Pressing the shortcut with no key set is the most likely
@@ -1088,11 +1098,11 @@ class YadaApp(QObject):
         self.tray.notify("yada", message, warning=True)
 
     def _on_warning(self, message: str) -> None:
-        # Three channels, because the toast is off by default on Windows and a warning that
-        # reaches nobody is why "live transcription unavailable" looked like yada simply
-        # being slow.
+        # Preserve the active dictation's panel. Problems still reach the tray tooltip
+        # and optional notification; when idle, the panel can carry the explanation too.
         self.tray.set_problem(message)
-        self.overlay.report(message)
+        if self._session_state is SessionState.IDLE:
+            self.overlay.report(message)
         self.tray.notify("yada", message, warning=True)
 
     def _on_update_status(self, status) -> None:

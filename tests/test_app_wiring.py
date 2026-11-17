@@ -148,6 +148,7 @@ def test_a_clean_finish_removes_the_panel(yada, qapp):
     qapp.processEvents()
     assert yada.overlay.isVisible()
 
+    yada.bridge.on_state(SessionState.IDLE)
     yada.bridge.on_finished(_finished())
     qapp.processEvents()
     assert not yada.overlay.isVisible(), "nothing to say means nothing on screen"
@@ -284,3 +285,30 @@ def test_notifications_off_does_not_silence_the_tooltip(yada, qapp):
     yada.bridge.on_warning("something went wrong")
     qapp.processEvents()
     assert "something went wrong" in (yada.tray._problem or "")
+
+
+@pytest.mark.parametrize("warnings", [[], ["Cleanup failed"]])
+def test_background_finish_preserves_active_overlay_and_tray(yada, qapp, warnings):
+    yada.bridge.on_state(SessionState.RECORDING)
+    yada.bridge.pending.emit(1)
+    yada.bridge.on_partial("another thought")
+    qapp.processEvents()
+    yada.bridge.on_finished(_finished(warnings=warnings))
+    qapp.processEvents()
+    assert yada.overlay.isVisible()
+    assert yada.overlay.text.text() == "another thought"
+    assert "live" in yada.overlay.status.text().lower()
+    assert yada.overlay.pending.isVisible()
+    assert yada.tray._state is SessionState.RECORDING
+    assert not yada.overlay._hide_timer.isActive()
+
+
+def test_background_error_preserves_active_recording(yada, qapp):
+    yada.bridge.on_state(SessionState.RECORDING)
+    yada.bridge.on_partial("another thought")
+    yada.bridge.on_error("Previous transcription failed")
+    qapp.processEvents()
+    assert yada.overlay.text.text() == "another thought"
+    assert yada.tray._state is SessionState.RECORDING
+    assert "Previous transcription failed" in yada.tray._problem
+    assert not yada.overlay._hide_timer.isActive()
