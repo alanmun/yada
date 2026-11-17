@@ -234,7 +234,7 @@ class AudioCapture:
     def start(self) -> None:
         try:
             import sounddevice as sd
-        except Exception as exc:  # noqa: BLE001 - PortAudio can fail during import too
+        except Exception as exc:  # PortAudio can fail during import too
             raise AudioDeviceError(
                 "No audio backend available (PortAudio could not be loaded)."
             ) from exc
