@@ -132,7 +132,8 @@ def test_host_api_preference_order():
     )
 
 
-def test_no_audio_stack_is_not_an_error(monkeypatch):
+@pytest.mark.parametrize("error", [ImportError, OSError, RuntimeError])
+def test_no_audio_stack_is_not_an_error(monkeypatch, error):
     """A missing PortAudio is the documented "container or fresh WSL" case, not a failure."""
     import builtins
 
@@ -140,9 +141,26 @@ def test_no_audio_stack_is_not_an_error(monkeypatch):
 
     def fake_import(name, *args, **kwargs):
         if name == "sounddevice":
-            raise ImportError("no sounddevice")
+            raise error("audio backend unavailable")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
     assert capture.list_input_devices() == []
+
+
+@pytest.mark.parametrize("error", [ImportError, OSError, RuntimeError])
+def test_audio_initialization_failure_is_reported_when_recording(monkeypatch, error):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise error("audio backend unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    microphone = capture.AudioCapture(lambda _frames: None)
+    with pytest.raises(capture.AudioDeviceError, match="No audio backend available"):
+        microphone.start()

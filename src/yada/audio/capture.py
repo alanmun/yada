@@ -88,7 +88,7 @@ def list_input_devices() -> list[DeviceInfo]:
     """
     try:
         import sounddevice as sd
-    except (ImportError, OSError):
+    except Exception:  # noqa: BLE001 - import also initializes an unavailable audio stack
         return []
     try:
         default_in = sd.default.device[0]
@@ -234,7 +234,7 @@ class AudioCapture:
     def start(self) -> None:
         try:
             import sounddevice as sd
-        except (ImportError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 - PortAudio can fail during import too
             raise AudioDeviceError(
                 "No audio backend available (PortAudio could not be loaded)."
             ) from exc
