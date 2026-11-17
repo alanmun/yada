@@ -30,6 +30,7 @@ import secrets
 import threading
 
 from ..config import config_dir
+from ..portal_identity import register_app_id
 
 PORTAL_BUS = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
@@ -193,6 +194,7 @@ class _PortalSession:
         self._handle: str | None = None
         self.ready = False
         self.error: str | None = None
+        self.identity_problem: str | None = None
 
     async def establish(self) -> None:
         try:
@@ -205,6 +207,8 @@ class _PortalSession:
 
         try:
             self._bus = await MessageBus(bus_type=BusType.SESSION).connect()
+            # Before any portal call, or the dialog names whatever app launched yada.
+            self.identity_problem = await register_app_id(self._bus)
             intro = await self._bus.introspect(PORTAL_BUS, PORTAL_PATH)
             obj = self._bus.get_proxy_object(PORTAL_BUS, PORTAL_PATH, intro)
             self._iface = obj.get_interface(REMOTE_DESKTOP)

@@ -24,6 +24,7 @@ import os
 import secrets
 import shutil
 
+from ..portal_identity import register_app_id
 from .base import HOLD_SECONDS, Combo, TriggerCallback
 
 PORTAL_BUS = "org.freedesktop.portal.Desktop"
@@ -68,6 +69,9 @@ class KdePortalHotkeyBackend:
         self._hold_timer: asyncio.TimerHandle | None = None
         self._combo: Combo | None = None
         self._error: str | None = None
+        # Why the portal could not be told this is yada, if it could not. Not an error:
+        # the shortcut still works, it is just filed under the launching app's name.
+        self.identity_problem: str | None = None
         self._bound = False
         self._task: asyncio.Task | None = None
 
@@ -144,6 +148,8 @@ class KdePortalHotkeyBackend:
 
         try:
             self._bus = await MessageBus(bus_type=BusType.SESSION).connect()
+            # Before any portal call, or the dialog names whatever app launched yada.
+            self.identity_problem = await register_app_id(self._bus)
             intro = await self._bus.introspect(PORTAL_BUS, PORTAL_PATH)
             obj = self._bus.get_proxy_object(PORTAL_BUS, PORTAL_PATH, intro)
             self._shortcuts = obj.get_interface(GLOBAL_SHORTCUTS)
