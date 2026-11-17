@@ -152,3 +152,23 @@ def test_the_summary_is_trimmed_for_a_row(store):
     summary = store.latest().summary(width=40)
     assert len(summary) <= 40
     assert summary.endswith("…")
+
+
+def test_recordings_survive_when_the_wall_clock_does_not_advance(store, monkeypatch):
+    from datetime import UTC, datetime
+
+    from yada.pipeline import recordings
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    monkeypatch.setattr(recordings, "datetime", FrozenClock)
+    monkeypatch.setattr(recordings, "_last_id_time", None)
+    for text in ("first", "second", "third"):
+        _add(store, transcript=text)
+    entries = store.entries()
+    assert [entry.transcript for entry in entries] == ["third", "second", "first"]
+    assert len({entry.id for entry in entries}) == 3
+    assert all(store.read_audio(entry.id) for entry in entries)

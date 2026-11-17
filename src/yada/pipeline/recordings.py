@@ -17,8 +17,9 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 
 from ..config import cache_dir
 
@@ -26,6 +27,8 @@ INDEX_NAME = "index.json"
 SCHEMA_VERSION = 1
 # Retained regardless of the setting, so a runaway value cannot fill a disk with audio.
 HARD_CAP = 20
+_ID_LOCK = Lock()
+_last_id_time: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -203,10 +206,16 @@ class RecordingStore:
 def new_recording_id() -> str:
     """Sortable and human-readable, so a directory listing is already chronological.
 
-    Microseconds rather than seconds, because two recordings in the same second must not
-    compare equal -- see the sort in `entries`.
+    Windows can return the same wall-clock value for successive recordings. Advance at
+    least one microsecond per ID so both the filenames and their ordering stay distinct.
     """
-    return datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+    global _last_id_time
+    with _ID_LOCK:
+        moment = datetime.now(UTC)
+        if _last_id_time is not None and moment <= _last_id_time:
+            moment = _last_id_time + timedelta(microseconds=1)
+        _last_id_time = moment
+        return moment.strftime("%Y%m%d-%H%M%S-%f")
 
 
 def now_iso() -> str:
