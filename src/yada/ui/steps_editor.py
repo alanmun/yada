@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import TransformStep
-from ..pipeline.transform import DEFAULT_SYSTEM_PROMPT
+from ..pipeline.transform import DEFAULT_SYSTEM_PROMPT, current_prompt
 from .widgets import PromptEditor, error_label, hint, labelled
 
 STEP_LABELS = {
@@ -241,7 +241,7 @@ class StepsEditor(QWidget):
         try:
             if step.type == "prompt_transform":
                 self.enabled_box.setChecked(step.enabled)
-                self.system_prompt.setPlainText(step.system_prompt)
+                self.system_prompt.setPlainText(current_prompt(step.system_prompt))
                 self.user_template.setText(step.user_prompt_template)
                 self.stack.setCurrentIndex(1)
             else:

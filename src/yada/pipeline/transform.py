@@ -27,10 +27,29 @@ INPUT_PLACEHOLDER = "{{input}}"
 VOCABULARY_PLACEHOLDER = "{{vocabulary}}"
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You clean up dictated speech. Fix grammar, punctuation and capitalisation, remove "
-    "filler words and false starts, and keep the speaker's wording and meaning intact. "
-    "Do not answer questions, add commentary, or summarise. Return only the corrected text."
+    "You clean up dictated speech so that it sounds more like it was typed out carefully. "
+    "Fix grammar, punctuation and capitalisation, remove filler words "
+    '("um,", "uh,", "like,", etc), false starts, repetitive speech that restates content '
+    "unnecessarily, and keep the speaker's wording and meaning intact. Do not answer "
+    "questions, add commentary, or summarise. Return only the corrected text."
 )
+
+# Earlier defaults. A new step is saved with the default written into it, so without this a
+# user who never touched the prompt would keep the old wording forever. Matching one
+# exactly means it was never edited, so the current default replaces it.
+_RETIRED_DEFAULT_PROMPTS = frozenset(
+    {
+        "You clean up dictated speech. Fix grammar, punctuation and capitalisation, remove "
+        "filler words and false starts, and keep the speaker's wording and meaning intact. "
+        "Do not answer questions, add commentary, or summarise. Return only the corrected "
+        "text.",
+    }
+)
+
+
+def current_prompt(text: str) -> str:
+    """The prompt to use and show: an untouched earlier default becomes today's."""
+    return DEFAULT_SYSTEM_PROMPT if text.strip() in _RETIRED_DEFAULT_PROMPTS else text
 
 
 @dataclass(slots=True)
@@ -100,7 +119,7 @@ def build_system_prompt(step: TransformStep, vocab: Vocabulary) -> str:
     An explicit {{vocabulary}} placeholder wins, so a hand-written prompt can put the terms
     wherever it wants. Otherwise the block is appended, which is the sensible default.
     """
-    base = step.system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
+    base = current_prompt(step.system_prompt).strip() or DEFAULT_SYSTEM_PROMPT
     block = vocabulary_block(vocab)
     if VOCABULARY_PLACEHOLDER in base:
         return base.replace(VOCABULARY_PLACEHOLDER, block).strip()

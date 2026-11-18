@@ -121,6 +121,32 @@ def test_default_system_prompt_used_when_blank():
     )
 
 
+def test_default_prompt_wording():
+    assert DEFAULT_SYSTEM_PROMPT == (
+        "You clean up dictated speech so that it sounds more like it was typed out carefully. "
+        'Fix grammar, punctuation and capitalisation, remove filler words ("um,", "uh,", '
+        '"like,", etc), false starts, repetitive speech that restates content unnecessarily, '
+        "and keep the speaker's wording and meaning intact. Do not answer questions, add "
+        "commentary, or summarise. Return only the corrected text."
+    )
+
+
+def test_an_untouched_old_default_is_upgraded():
+    """It was saved into the step when created, so it would otherwise never change."""
+    old = (
+        "You clean up dictated speech. Fix grammar, punctuation and capitalisation, remove "
+        "filler words and false starts, and keep the speaker's wording and meaning intact. "
+        "Do not answer questions, add commentary, or summarise. Return only the corrected text."
+    )
+    step = TransformStep(system_prompt=old)
+    assert build_system_prompt(step, Vocabulary()) == DEFAULT_SYSTEM_PROMPT
+
+
+def test_an_edited_prompt_is_left_alone():
+    step = TransformStep(system_prompt="Translate to French.")
+    assert build_system_prompt(step, Vocabulary()) == "Translate to French."
+
+
 def test_user_prompt_placeholder_substitution():
     step = TransformStep(user_prompt_template="Clean this:\n{{input}}")
     assert build_user_prompt(step, "hello") == "Clean this:\nhello"
