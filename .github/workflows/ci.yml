@@ -37,3 +37,27 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: uv run pytest -q
+
+  e2e-kde:
+    # yada against a real, headless KDE Plasma session: KWin, the portals and the Wayland
+    # clipboard. Every Wayland bug so far lived in that conversation, where unit tests
+    # cannot see. Fedora rather than Ubuntu because Ubuntu's runners ship Plasma 5, whose
+    # KWin scripting API differs. Free on a public repository.
+    runs-on: ubuntu-latest
+    container: fedora:45
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the KDE session pieces
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            kwin-wayland xdg-desktop-portal xdg-desktop-portal-kde dbus-daemon dbus-tools \
+            systemd wl-clipboard uv python3 portaudio mesa-dri-drivers mesa-libEGL \
+            libxkbcommon fontconfig dejavu-sans-fonts
+
+      - name: Install
+        run: uv sync --all-extras
+
+      - name: End-to-end tests
+        run: uv run python scripts/e2e_kde.py -v

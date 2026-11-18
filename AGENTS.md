@@ -37,3 +37,17 @@ ships. Before a release:
    breaks visibly.
 
 Report the result in one line even when nothing is stale, so the user knows it ran.
+
+## End-to-end tests on KDE Wayland
+
+`tests/e2e` runs yada against a real, headless KDE Plasma session: KWin, the portals and
+the Wayland clipboard. Unit tests cannot see that layer, and it is where every Wayland bug
+so far has lived. Run them after touching anything Linux-desktop-facing (clipboard, paste,
+hotkeys, overlay, KWin script):
+
+    uv run python scripts/e2e_kde.py           # extra arguments go to pytest
+
+They need a KDE install (kwin_wayland, xdg-desktop-portal-kde, wl-clipboard). The session
+is private and renders off-screen, so nothing appears on the desktop. CI runs them in a
+Fedora container (`e2e-kde` in `.github/workflows/ci.yml`). A new test should be shown to
+fail against the code it guards before it is trusted.
