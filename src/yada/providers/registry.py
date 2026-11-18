@@ -24,8 +24,8 @@ def _mirror_openai(picks: tuple[str, ...], *fallbacks: str) -> tuple[str, ...]:
     falls through to the first candidate discovery actually returns. Checked against its
     public catalogue: gpt-live-transcribe is not on OpenRouter in any form, so transcription
     falls through to `openai/gpt-transcribe` -- which is the model measured at 0% word error
-    rate on OpenAI's own API. gpt-5.6-luna and gpt-5.6-terra are both carried, so transforms
-    mirror exactly.
+    rate on OpenAI's own API. gpt-6-luna, gpt-5.6-luna and gpt-5.6-terra are all carried
+    (checked 2026-11-18), so transforms mirror exactly.
 
     The fallbacks are non-OpenAI models for the case where none of the mirrored picks is
     available at all.
@@ -51,9 +51,10 @@ _OPENAI = ProviderSpec(
     # gpt-transcribe is the fallback: equally accurate, no streaming deltas, and it
     # refuses `delay`.
     recommended_transcription=("gpt-live-transcribe", "gpt-transcribe", "gpt-4o-transcribe"),
-    # Luna is the efficient tier of the 5.6 family, which is the right shape for a
-    # short cleanup pass; Terra is the step up when the pass needs more judgement.
-    recommended_transform=("gpt-5.6-luna", "gpt-5.6-terra"),
+    # Luna is the efficient tier of each family, which is the right shape for a short
+    # cleanup pass. GPT-6 Luna leads; 5.6 Luna and Terra cover accounts or routers that
+    # do not offer it yet.
+    recommended_transform=("gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra"),
 )
 
 _OPENROUTER = ProviderSpec(

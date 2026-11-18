@@ -1186,9 +1186,12 @@ class YadaApp(QObject):
         stt_id = self.settings.transcription.provider
         stt_entry = self.catalog.entry(stt_id)
         stt_models = stt_entry.for_modality(Modality.TRANSCRIPTION)
+        # The picker's own selection, not the saved setting: a choice made in the last few
+        # hundred milliseconds is not saved yet, and redrawing with the saved model snapped
+        # it straight back. After a load or reset the picker already holds the saved value.
         window.stt_model.set_models(
             stt_models,
-            current=self.settings.transcription.model,
+            current=window.stt_model.current_model(),
             recommended=self._recommended(stt_id, Modality.TRANSCRIPTION, stt_models),
         )
         window.stt_model.set_status(self._model_status(stt_id, stt_entry))
@@ -1205,7 +1208,7 @@ class YadaApp(QObject):
         tf_models = tf_entry.for_modality(Modality.TEXT)
         window.tf_model.set_models(
             tf_models,
-            current=self.settings.transform.model,
+            current=window.tf_model.current_model(),
             recommended=self._recommended(tf_id, Modality.TEXT, tf_models),
         )
         window.tf_model.set_status(self._model_status(tf_id, tf_entry))
@@ -1311,6 +1314,9 @@ class YadaApp(QObject):
             self.refresh_models("transcription")
         if new_settings.transform.provider != old.transform.provider:
             self.refresh_models("transform")
+        elif new_settings.transform.model != old.transform.model:
+            # Only now, with the new model saved, do its capabilities mean anything.
+            self.refresh_models("capabilities")
         self._push_status_to_settings()
 
     def _on_provider_test_result(self, provider_id: str, message: str) -> None:

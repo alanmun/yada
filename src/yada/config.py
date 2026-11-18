@@ -98,9 +98,9 @@ class TransformStep:
 class TransformSettings:
     enabled: bool = False
     provider: str = "openai"
-    # GPT-5.6 Luna: the efficient tier of the Sol/Terra/Luna family, and the right default
+    # GPT-6 Luna: the efficient tier of the Sol/Terra/Luna family, and the right default
     # for short, high-volume cleanup passes.
-    model: str = "gpt-5.6-luna"
+    model: str = "gpt-6-luna"
     # none|low|medium|high|xhigh|max. Cleanup rarely benefits from reasoning; default off.
     reasoning_effort: str = "none"
     # 'fast' is OpenAI's renamed priority processing: 2x price, up to ~2.5x faster. On a

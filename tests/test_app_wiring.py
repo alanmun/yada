@@ -365,3 +365,37 @@ def test_turning_paste_back_on_asks_for_permission_again(yada, monkeypatch):
     )
     yada._on_settings_saved(new)
     assert len(asked) == 1
+
+
+def test_a_new_model_choice_survives_a_refresh_before_autosave(yada, qapp):
+    """The bug: picking a transform model snapped back to the recommended one.
+
+    A refresh landing in the 400 ms before the debounced save redrew the picker with the
+    saved (old) model, and the save then wrote that old model back.
+    """
+    from yada.providers.base import Modality, ModelInfo
+
+    yada.settings.transform.model = "gpt-6-luna"
+    yada.show_settings()
+    qapp.processEvents()
+    window = yada.settings_window
+    try:
+        models = [
+            ModelInfo(id=i, provider="openai", modality=Modality.TEXT)
+            for i in ("gpt-6-luna", "gpt-6-sol")
+        ]
+        window.tf_model.set_models(models, current="gpt-6-luna", recommended="gpt-6-luna")
+        window.tf_model.combo.setCurrentIndex(window.tf_model.combo.findData("gpt-6-sol"))
+
+        yada._push_status_to_settings()  # any refresh arriving before the save
+        assert window.tf_model.current_model() == "gpt-6-sol"
+
+        window._save_timer.stop()
+        window._commit()
+        qapp.processEvents()
+        assert yada.settings.transform.model == "gpt-6-sol"
+    finally:
+        window.discard_pending_save()
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()

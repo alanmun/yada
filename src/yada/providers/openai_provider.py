@@ -190,7 +190,8 @@ _TRANSCRIBE_RANK = {
     "whisper-1": 20,
 }
 _TRANSFORM_RANK = {
-    "gpt-5.6-luna": 100,  # efficient tier; the right default for short cleanup passes
+    "gpt-6-luna": 110,  # efficient tier; the right default for short cleanup passes
+    "gpt-5.6-luna": 100,
     "gpt-5.6-terra": 80,
     "gpt-5.6-sol": 70,
 }

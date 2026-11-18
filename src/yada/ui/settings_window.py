@@ -582,7 +582,9 @@ class SettingsWindow(QWidget):
         self.tf_model.refresh_requested.connect(
             lambda: self.refresh_models_requested.emit("transform")
         )
-        self.tf_model.changed.connect(lambda _: self.refresh_models_requested.emit("capabilities"))
+        # Capabilities are refreshed after the autosave, not here: refreshing now read the
+        # *old* saved model and redrew the picker with it, snapping a new choice straight
+        # back -- and the 400 ms autosave then saved the old model again.
 
         row = QHBoxLayout()
         # Zero margins on every row wrapped in a QWidget. A QWidget applies its own layout
