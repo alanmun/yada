@@ -46,6 +46,9 @@ jobs:
     runs-on: ubuntu-latest
     container: fedora:45
     timeout-minutes: 20
+    env:
+      # Fedora's packaged uv will not fetch the Python version .python-version pins.
+      UV_PYTHON_DOWNLOADS: automatic
     steps:
       - uses: actions/checkout@v4
 
