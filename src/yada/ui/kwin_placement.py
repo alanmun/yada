@@ -8,7 +8,9 @@ window, and KWin lets a script do it.
 So on a KDE Wayland session yada loads a small KWin script over D-Bus. It watches for
 windows of class `yada` titled `OVERLAY_TITLE`, pins them bottom-centre of the active
 screen's work area (the same spot `LiveOverlay._reposition` computes on X11 and Windows),
-keeps them above other windows, and re-centres them as the text grows.
+keeps them above other windows, re-centres them as the text grows, and hands keyboard
+focus back to the previous window if KWin activates the overlay -- otherwise yada's Ctrl+V
+lands in the overlay instead of where the user was typing.
 
 The script lives in KWin, not in yada, so it is unloaded on quit and replaced on start --
 a crash leaves at most a script that matches nothing until the next launch. Anything
@@ -58,6 +60,20 @@ function track(w) {
 }
 workspace.windowAdded.connect(track);
 workspace.windowList().forEach(track);
+
+// The overlay must never hold keyboard focus: yada pastes with Ctrl+V into whatever has
+// it. Qt's WA_ShowWithoutActivating means nothing on Wayland, and KWin sometimes activates
+// the overlay as it appears -- the paste then lands in the overlay and vanishes. Hand
+// focus straight back to the window that had it.
+let lastFocused = isOverlay(workspace.activeWindow) ? null : workspace.activeWindow;
+workspace.windowActivated.connect(function (w) {
+    if (!w) return;
+    if (!isOverlay(w)) {
+        lastFocused = w;
+        return;
+    }
+    if (lastFocused && !lastFocused.deleted) workspace.activeWindow = lastFocused;
+});
 """
 
 

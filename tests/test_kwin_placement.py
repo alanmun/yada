@@ -37,3 +37,14 @@ def test_only_kde_wayland_needs_it(monkeypatch, session, desktop, expected):
     monkeypatch.setenv("XDG_SESSION_TYPE", session)
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", desktop)
     assert kwin_placement.kde_wayland_session() is expected
+
+
+def test_script_hands_focus_back_when_kwin_activates_the_overlay():
+    """yada pastes with Ctrl+V into whatever has focus; the overlay must never keep it.
+
+    Seen on Plasma 6: KWin activated the overlay as dictation started, so the paste landed
+    in the overlay and the text never appeared.
+    """
+    source = kwin_placement.script_source()
+    assert "workspace.windowActivated.connect" in source
+    assert "workspace.activeWindow = lastFocused" in source
