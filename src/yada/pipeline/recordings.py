@@ -127,14 +127,23 @@ class RecordingStore:
         """Store audio and its outcome. Returns the stored entry, or None if disabled."""
         if self.keep <= 0 or not wav_bytes:
             return None
+        # The audio becomes visible only once its index row exists. `entries()` lists
+        # *.wav files and describes any without a row as "details were lost", so writing
+        # the audio first let a concurrent reader see the recording with no transcript.
+        final = self.audio_path(recording.id)
+        staging = final.with_name(final.name + ".partial")
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
-            self.audio_path(recording.id).write_bytes(wav_bytes)
+            staging.write_bytes(wav_bytes)
         except OSError:
             return None
         rows = [r for r in self._load_index() if r.id != recording.id]
         rows.append(recording)
         self._save_index(rows)
+        try:
+            staging.replace(final)
+        except OSError:
+            return None
         self.prune()
         return recording
 

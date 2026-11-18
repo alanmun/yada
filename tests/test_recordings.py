@@ -172,3 +172,28 @@ def test_recordings_survive_when_the_wall_clock_does_not_advance(store, monkeypa
     assert [entry.transcript for entry in entries] == ["third", "second", "first"]
     assert len({entry.id for entry in entries}) == 3
     assert all(store.read_audio(entry.id) for entry in entries)
+
+
+def test_audio_is_not_listed_before_its_details(tmp_path, monkeypatch):
+    """A reader between the two writes saw the recording with no transcript.
+
+    `entries()` lists audio files, so the audio must only appear once its row exists.
+    """
+    from yada.pipeline import recordings as rec_mod
+
+    store = rec_mod.RecordingStore(keep=5, directory=tmp_path)
+    seen_mid_write = []
+    real_save = rec_mod.RecordingStore._save_index
+
+    def save_and_peek(self, rows):
+        seen_mid_write.append([e.id for e in self.entries()])
+        real_save(self, rows)
+
+    monkeypatch.setattr(rec_mod.RecordingStore, "_save_index", save_and_peek)
+    entry = rec_mod.Recording(
+        id="r1", recorded_at="2026-11-18T12:00:00", duration_seconds=1.0, transcript="hi"
+    )
+    store.add(b"RIFF....", entry)
+    assert seen_mid_write == [[]], "the audio was visible before its index row"
+    assert [e.transcript for e in store.entries()] == ["hi"]
+    assert not list(tmp_path.glob("*.partial"))

@@ -810,8 +810,10 @@ async def test_new_recording_is_immediate_and_results_keep_speech_order(paste_mo
 
     stt.release[1].set()
     # The second transcript is saved, proving it processed while the first was blocked.
-    for _ in range(1000):
-        if store.entries():
+    # Wait for the transcript, not just the entry: the recording is stored before its
+    # transcript is filled in, and a slow Windows runner caught that gap.
+    for _ in range(2000):
+        if store.entries() and store.entries()[0].transcript:
             break
         await asyncio.sleep(0.001)
     assert store.entries()[0].transcript == "second"
