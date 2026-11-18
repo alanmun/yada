@@ -15,3 +15,9 @@ import os
 
 # Before any test module imports PySide6, which reads this at QApplication construction.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# Likewise the desktop session. CI has none; a local run on Plasma Wayland would otherwise
+# build the real RemoteDesktop portal backend, and any test that turns pasting on would put
+# a genuine permission dialog on the developer's screen. Tests that care set these.
+for _name in ("XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "WAYLAND_DISPLAY"):
+    os.environ.pop(_name, None)

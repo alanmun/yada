@@ -129,6 +129,14 @@ class EventBridge(QObject):
     # The recording store changed, so the Recordings tab should redraw. Its own signal
     # rather than borrowing catalog_changed, which is about discovered models.
     recordings_changed = Signal()
+    # A chime requested by the session, which runs on the asyncio thread. QSoundEffect is a
+    # GUI-thread object, and playing it from the loop made Qt Multimedia's PipeWire backend
+    # toggle socket notifiers from the wrong thread ("Socket notifiers cannot be enabled or
+    # disabled from another thread") -- which corrupted PipeWire's connection and, minutes
+    # later, crashed yada inside libpipewire or with a heap-corruption abort.
+    chime_requested = Signal(object)
+    # The user refused the desktop's keystroke permission. Arrives from the portal thread.
+    paste_declined = Signal()
 
     def on_state(self, state: SessionState) -> None:
         self.state.emit(state)
@@ -182,7 +190,7 @@ class YadaApp(QObject):
                 transcriber=self._build_transcriber,
                 transformer=self._build_transformer,
                 events=self.bridge,
-                chime=self._chime,
+                chime=self.bridge.chime_requested.emit,
                 deliver=self.bridge.deliver_requested.emit,
                 recordings=self.recordings,
                 pending_changed=self.bridge.pending.emit,
@@ -221,6 +229,7 @@ class YadaApp(QObject):
         self._apply_notification_setting()
         self._start_hotkey()
         self._place_overlay_with_kwin()
+        self._request_paste_permission()
         # On its own thread rather than the loop: PortAudio initialisation is blocking C
         # code, and the point is to keep it away from anything that is being waited on.
         threading.Thread(target=warm_up_audio, name="yada-audio-warmup", daemon=True).start()
@@ -405,6 +414,10 @@ class YadaApp(QObject):
         )
         self.bridge.quit_requested.connect(self.quit, Qt.ConnectionType.QueuedConnection)
         self.bridge.deliver_requested.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
+        self.bridge.chime_requested.connect(self._chime, Qt.ConnectionType.QueuedConnection)
+        self.bridge.paste_declined.connect(
+            self._on_paste_declined, Qt.ConnectionType.QueuedConnection
+        )
         self.bridge.copy_requested.connect(self._copy_only, Qt.ConnectionType.QueuedConnection)
         self.bridge.recordings_changed.connect(
             self._push_recordings, Qt.ConnectionType.QueuedConnection
@@ -543,6 +556,33 @@ class YadaApp(QObject):
     def _apply_notification_setting(self) -> None:
         self.tray.notifications_enabled = self.settings.output.show_notifications
         self.overlay.set_enabled(self.settings.output.show_overlay)
+
+    def _request_paste_permission(self) -> None:
+        """Ask for keystroke permission at startup, not halfway through the first dictation.
+
+        Only backends that need a grant (the Wayland portal) have anything to ask; after
+        the first approval the desktop restores it silently.
+        """
+        if self.settings.output.paste_mode == "off":
+            return
+        request = getattr(self.paste_backend, "request_permission", None)
+        if request is not None:
+            request(self.bridge.paste_declined.emit)
+
+    def _on_paste_declined(self) -> None:
+        """Respect a refusal by turning auto-paste off, rather than asking again each time."""
+        if self.settings.output.paste_mode == "off":
+            return
+        self.settings.output.paste_mode = "off"
+        config.save(self.settings)
+        if self.settings_window is not None:
+            self.settings_window.load(self.settings)
+        self.tray.notify(
+            "Auto-paste is off",
+            "Permission to send keystrokes was declined, so yada will not paste. "
+            "Turn pasting back on in Settings to be asked again.",
+            warning=True,
+        )
 
     def _place_overlay_with_kwin(self) -> None:
         """On KDE Wayland, let KWin put the overlay bottom-centre; yada cannot."""
@@ -1245,6 +1285,8 @@ class YadaApp(QObject):
 
         self._configure_chimes()
         self._apply_notification_setting()
+        if old.output.paste_mode == "off" and new_settings.output.paste_mode != "off":
+            self._request_paste_permission()
         self.recordings.keep = max(0, new_settings.output.keep_recordings)
         if new_settings.output.keep_recordings < old.output.keep_recordings:
             # Lowering the number should take effect now, not at the end of the next

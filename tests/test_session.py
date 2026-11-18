@@ -389,11 +389,21 @@ async def test_transform_failure_still_yields_transcript(fake_audio):
     assert rec.chimes == [Stage.LISTENING, Stage.TRANSCRIPTION, Stage.TRANSFORMATION]
 
 
-async def test_no_paste_by_default(fake_audio):
+async def test_pastes_the_transcript_by_default(fake_audio):
     sess, rec, _ = build(transcriber=FakeTranscriber())
     await sess.toggle_async()
     await sess.toggle_async()
-    assert rec.delivered == [], "auto-paste must be opt-in"
+    assert rec.delivered == [("batch text", Stage.TRANSCRIPTION)], (
+        "pasting is the point of dictation; a fresh install should not need a settings trip"
+    )
+
+
+async def test_off_pastes_nothing(fake_audio):
+    settings = Settings(output=OutputSettings(paste_mode="off"))
+    sess, rec, _ = build(settings=settings, transcriber=FakeTranscriber())
+    await sess.toggle_async()
+    await sess.toggle_async()
+    assert rec.delivered == []
 
 
 async def test_paste_after_transcription(fake_audio):

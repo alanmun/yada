@@ -28,6 +28,7 @@ import contextlib
 import os
 import secrets
 import threading
+from collections.abc import Callable
 
 from ..config import config_dir
 from ..portal_identity import register_app_id
@@ -100,6 +101,7 @@ class PortalPasteBackend:
         self._session: _PortalSession | None = None
         self._starting = False
         self._error: str | None = None
+        self._on_declined: Callable[[], None] | None = None
 
     @staticmethod
     def available() -> bool:
@@ -155,11 +157,22 @@ class PortalPasteBackend:
             "once and pasting will work from then on. The text is on your clipboard."
         )
 
+    def request_permission(self, on_declined: Callable[[], None]) -> None:
+        """Ask for keystroke permission now rather than at the first paste.
+
+        With a stored restore token the desktop grants it silently. `on_declined` runs on
+        the portal thread, and only when the user refused -- not when the portal is
+        missing or slow -- so callers must marshal it to their own thread.
+        """
+        self._on_declined = on_declined
+        self._begin_session()
+
     def _begin_session(self) -> None:
         """Start establishing the session, at most once, without blocking the caller."""
         if self._starting or (self._session is not None and self._session.ready):
             return
         self._starting = True
+        self._error = None  # a fresh attempt, e.g. after re-enabling a declined paste
         session = _PortalSession()
         self._session = session
 
@@ -172,6 +185,9 @@ class PortalPasteBackend:
                 self._starting = False
                 if session.error:
                     self._error = session.error
+                if session.declined and self._on_declined is not None:
+                    with contextlib.suppress(Exception):
+                        self._on_declined()
 
         asyncio.run_coroutine_threadsafe(establish(), self._ensure_loop())
 
@@ -193,6 +209,7 @@ class _PortalSession:
         self._iface = None
         self._handle: str | None = None
         self.ready = False
+        self.declined = False  # the user refused, as opposed to anything else failing
         self.error: str | None = None
         self.identity_problem: str | None = None
 
@@ -284,6 +301,8 @@ class _PortalSession:
         await self._iface.call_start(self._handle, "", {"handle_token": Variant("s", token)})
         code, results = await waiter
         if code != 0:
+            # 1 is the user cancelling; 2 is anything else, timeouts included.
+            self.declined = code == 1
             self.error = (
                 "Permission to send keystrokes was declined. Auto-paste stays off; the "
                 "text is still copied to your clipboard."

@@ -312,3 +312,56 @@ def test_background_error_preserves_active_recording(yada, qapp):
     assert yada.tray._state is SessionState.RECORDING
     assert "Previous transcription failed" in yada.tray._problem
     assert not yada.overlay._hide_timer.isActive()
+
+
+def test_the_session_chime_plays_on_the_gui_thread(yada, qapp, monkeypatch):
+    """The bug: the session called the chime on the asyncio thread.
+
+    QSoundEffect is a GUI-thread object; played from the loop, Qt Multimedia's PipeWire
+    backend corrupted its connection and yada crashed minutes later inside libpipewire.
+    """
+    import threading
+
+    from yada.pipeline.session import Stage
+
+    played_on = []
+    monkeypatch.setattr(
+        yada.chimes, "play", lambda stage: played_on.append(threading.current_thread())
+    )
+    worker = threading.Thread(target=yada.session._deps.chime, args=(Stage.LISTENING,))
+    worker.start()
+    worker.join()
+    assert played_on == [], "must not play on the calling thread"
+    qapp.processEvents()
+    assert played_on == [threading.main_thread()]
+
+
+
+def test_declining_keystroke_permission_turns_auto_paste_off(yada, qapp, monkeypatch):
+    """Respect the refusal: stop pasting, persist it, and say so once."""
+    import yada.config as cfg
+
+    notes = []
+    monkeypatch.setattr(yada.tray, "notify", lambda title, *_a, **_k: notes.append(title))
+    yada.settings.output.paste_mode = "after_transcription"
+    yada.bridge.paste_declined.emit()
+    qapp.processEvents()
+    assert yada.settings.output.paste_mode == "off"
+    assert cfg.load().output.paste_mode == "off", "the refusal must survive a restart"
+    assert notes == ["Auto-paste is off"]
+
+
+def test_turning_paste_back_on_asks_for_permission_again(yada, monkeypatch):
+    import dataclasses
+
+    asked = []
+    monkeypatch.setattr(
+        yada.paste_backend, "request_permission", lambda cb: asked.append(cb), raising=False
+    )
+    yada.settings.output.paste_mode = "off"
+    new = dataclasses.replace(
+        yada.settings,
+        output=dataclasses.replace(yada.settings.output, paste_mode="after_transcription"),
+    )
+    yada._on_settings_saved(new)
+    assert len(asked) == 1

@@ -231,3 +231,58 @@ def test_sending_before_the_session_is_ready_is_refused(monkeypatch):
     session = portal_paste._PortalSession()
     ok, error = asyncio.run(session.send_paste())
     assert ok is False and "not ready" in (error or "")
+
+
+def test_pasting_is_on_by_default():
+    """Pasting is the point of dictation; a fresh install should not need a settings trip."""
+    from yada.config import Settings
+
+    assert Settings().output.paste_mode == "after_transcription"
+
+
+class _FakeSession:
+    """Stands in for the D-Bus conversation; `outcome` decides how the dialog went."""
+
+    outcome = "declined"
+
+    def __init__(self):
+        self.ready = False
+        self.declined = False
+        self.error = None
+
+    async def establish(self):
+        if self.outcome == "granted":
+            self.ready = True
+        elif self.outcome == "declined":
+            self.declined = True
+            self.error = "declined"
+        else:
+            self.error = "portal missing"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "told"),
+    [("declined", True), ("granted", False), ("broken", False)],
+)
+def test_only_an_explicit_refusal_reports_a_decline(monkeypatch, outcome, told):
+    """A missing or slow portal must not be mistaken for the user saying no."""
+    import threading
+
+    from yada.output import portal_paste
+
+    monkeypatch.setattr(_FakeSession, "outcome", outcome)
+    monkeypatch.setattr(portal_paste, "_PortalSession", _FakeSession)
+    backend = portal_paste.PortalPasteBackend()
+    done = threading.Event()
+    calls = []
+
+    def on_declined():
+        calls.append(True)
+
+    backend.request_permission(on_declined)
+    # The session runs on the backend's own loop; wait for it to settle.
+    for _ in range(100):
+        if not backend._starting:
+            break
+        done.wait(0.01)
+    assert bool(calls) is told

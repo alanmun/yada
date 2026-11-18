@@ -116,8 +116,10 @@ class TransformSettings:
 
 @dataclass(slots=True)
 class OutputSettings:
-    # off | after_transcription | after_transformation. Never automatic without opt-in.
-    paste_mode: str = "off"
+    # off | after_transcription | after_transformation. Pasting is the point of dictation,
+    # so it is on by default; where the desktop has to grant keystrokes (Wayland), yada
+    # asks at startup and falls back to "off" if the user declines.
+    paste_mode: str = "after_transcription"
     # Three distinct chimes. The listening one matters most: it is the only confirmation
     # that the shortcut fired at all, and without it a misconfigured yada is
     # indistinguishable from a shortcut that never registered.
