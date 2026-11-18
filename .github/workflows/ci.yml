@@ -58,6 +58,10 @@ jobs:
             kwin-wayland xdg-desktop-portal xdg-desktop-portal-kde dbus-daemon dbus-tools \
             systemd wl-clipboard uv python3 portaudio mesa-dri-drivers mesa-libEGL \
             libxkbcommon fontconfig dejavu-sans-fonts
+          # kwin_wayland carries a file capability (realtime scheduling) that a container
+          # may not grant, so exec fails with EPERM. A plain copy drops it, and a headless
+          # session does not need realtime priority. /usr/local/bin precedes /usr/bin.
+          cp /usr/bin/kwin_wayland /usr/local/bin/kwin_wayland
 
       - name: Install
         run: uv sync --all-extras
