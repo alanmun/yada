@@ -97,6 +97,8 @@ hiddenimports = [
     "yada.hotkey.win32",
     "yada.hotkey.kde_portal",
     "yada.hotkey.external",
+    # Imported only on Wayland, to set the clipboard through KDE's Klipper without focus.
+    "PySide6.QtDBus",
 ]
 
 # Qt is the bulk of the download. Excluding what yada cannot use roughly halves it.
