@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..config import TARGET_SAMPLE_RATE
+from .hostaudio import prefer_host_alsa
 
 FramesCallback = Callable[[bytes], None]
 
@@ -90,6 +91,7 @@ def list_input_devices() -> list[DeviceInfo]:
     normal state in a container or a fresh WSL session, and the UI should say so calmly.
     """
     try:
+        prefer_host_alsa()
         import sounddevice as sd
     except Exception:  # noqa: BLE001 - import also initializes an unavailable audio stack
         return []
@@ -188,7 +190,7 @@ def warm_up() -> None:
 _ALSA_SLOT = re.compile(r"\s*\(hw:\d+,\d+\)\s*$")
 
 
-def _without_slot(name: str) -> str:
+def without_slot(name: str) -> str:
     return _ALSA_SLOT.sub("", " ".join(name.split())).lower()
 
 
@@ -214,9 +216,9 @@ def resolve_device(name: str | None) -> int | None:
         if _device_key(dev.name) == key:
             return dev.index
     # The same microphone under a new ALSA slot number.
-    bare = _without_slot(name)
+    bare = without_slot(name)
     for dev in devices:
-        if _without_slot(dev.name) == bare:
+        if without_slot(dev.name) == bare:
             return dev.index
     return None
 
@@ -274,11 +276,16 @@ class AudioCapture:
         # Set from the callback thread, read from the UI thread. A plain attribute is fine:
         # it is only ever a status string and a lost update is harmless.
         self.last_error: str | None = None
+        # Set when the chosen microphone was absent and the system default stood in for
+        # it. The setting itself is never changed; this is so the substitution is said out
+        # loud rather than discovered from a bad transcript.
+        self.substitution: str | None = None
 
     # -- lifecycle ----------------------------------------------------------------------
 
     def start(self) -> None:
         try:
+            prefer_host_alsa()
             import sounddevice as sd
         except Exception as exc:  # PortAudio can fail during import too
             raise AudioDeviceError(
@@ -292,6 +299,12 @@ class AudioCapture:
             except Exception as exc:
                 raise AudioDeviceError(f"Could not reach the audio system: {exc}") from exc
             index = resolve_device(self._device_name)
+            self.substitution = (
+                f"Your microphone ({self._device_name}) is not connected, so this used the "
+                "system default instead."
+                if self._device_name and index is None
+                else None
+            )
             try:
                 info = sd.query_devices(
                     index if index is not None else sd.default.device[0], "input"

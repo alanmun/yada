@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import secrets
-from ..audio import list_input_devices
+from ..audio import list_input_devices, without_slot
 from ..config import Settings
 from ..hotkey import available_backends, toggle_command
 from ..output import create_paste_backend, sounds
@@ -983,9 +983,13 @@ class SettingsWindow(QWidget):
                 device_holder,
                 tip=(
                     "Stored by name, not by position, so unplugging a headset will not silently "
-                    "switch you to the wrong microphone. Windows lists each microphone once "
-                    "per audio subsystem; yada shows one entry per device and uses the best "
-                    "of them."
+                    "switch you to the wrong microphone."
+                    + (
+                        " Windows lists each microphone once per audio subsystem; yada "
+                        "shows one entry per device and uses the best of them."
+                        if sys.platform == "win32"
+                        else ""
+                    )
                 ),
             )
         )
@@ -1078,9 +1082,13 @@ class SettingsWindow(QWidget):
         notice_layout.addWidget(self.show_notifications)
         notice_layout.addWidget(
             hint(
-                "On Windows these arrive as toasts in the corner of the screen. Warnings "
-                "and errors appear on the tray icon's tooltip and in this window either "
-                "way."
+                (
+                    "These arrive as toasts in the corner of the screen. "
+                    if sys.platform == "win32"
+                    else ""
+                )
+                + "Warnings and errors appear on the tray icon's tooltip and in this "
+                "window either way."
             )
         )
         layout.addWidget(notice_box)
@@ -1184,14 +1192,9 @@ class SettingsWindow(QWidget):
         for dev in list_input_devices():
             suffix = "  (default)" if dev.is_default else ""
             self.audio_device.addItem(f"{dev.name}{suffix}", dev.name)
-        if current:
-            index = self.audio_device.findData(current)
-            if index < 0:
-                # Keep a configured-but-absent device visible rather than silently
-                # reassigning the user's choice.
-                self.audio_device.addItem(f"{current}  (not connected)", current)
-                index = self.audio_device.count() - 1
-            self.audio_device.setCurrentIndex(index)
+        # Keeps a configured-but-absent device visible rather than silently reassigning
+        # the user's choice.
+        self._select_device(current)
 
     # ==================================================================================
     # Updates
@@ -1279,7 +1282,7 @@ class SettingsWindow(QWidget):
         self._select(self.hotkey_backend, s.hotkey.backend)
 
         self._reload_devices()
-        self._select(self.audio_device, s.audio.device)
+        self._select_device(s.audio.device)
         self.audio_gain.setValue(s.audio.input_gain)
 
         self._select(self.theme_combo, s.theme)
@@ -1360,7 +1363,14 @@ class SettingsWindow(QWidget):
         s.hotkey.combo = self._last_valid_combo or "ctrl+shift+;"
         s.hotkey.backend = self._chosen(self.hotkey_backend, self._settings.hotkey.backend)
 
-        s.audio.device = self.audio_device.currentData()
+        # The stored microphone survives anything this combo failed to show. "System
+        # default" is saved only when it is what the combo was told to show or what the
+        # user picked.
+        s.audio.device = (
+            self._settings.audio.device
+            if self.audio_device in self._unresolved
+            else self.audio_device.currentData()
+        )
         s.audio.input_gain = float(self.audio_gain.value())
 
         s.theme = self._chosen(self.theme_combo, self._settings.theme)
@@ -1412,6 +1422,38 @@ class SettingsWindow(QWidget):
             combo.setCurrentIndex(index)
             self._unresolved.discard(combo)
         else:
+            self._unresolved.add(combo)
+
+    def _select_device(self, stored: str | None) -> None:
+        """Show the stored microphone, whatever has happened to the device list.
+
+        The combo's first entry is "System default", so a stored microphone that is not
+        in the list must never leave the combo sitting there: the next autosave would
+        write the default over the user's choice. A device the kernel renumbered is
+        matched without its slot; one that is absent gets its own "(not connected)" entry.
+        """
+        combo = self.audio_device
+        self._unresolved.discard(combo)
+        if not stored:
+            combo.setCurrentIndex(0)
+            return
+        index = combo.findData(stored)
+        if index < 0:
+            bare = without_slot(stored)
+            index = next(
+                (
+                    i
+                    for i in range(1, combo.count())
+                    if without_slot(str(combo.itemData(i))) == bare
+                ),
+                -1,
+            )
+        if index < 0:
+            combo.addItem(f"{stored}  (not connected)", stored)
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+        if combo.currentData() is None:
+            # Could not be shown after all; make sure a save keeps what was stored.
             self._unresolved.add(combo)
 
     def _chosen(self, combo: QComboBox, stored: str) -> str:

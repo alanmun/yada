@@ -308,3 +308,67 @@ def test_the_text_scale_fallback_is_not_a_different_default(qapp, window):
     assert window.collect().text_scale == pytest.approx(1.55), (
         "an unrecognised scale must be preserved, not replaced with 2.0"
     )
+
+
+# -- the microphone choice is never replaced by "System default" -----------------------
+
+
+def _with_devices(monkeypatch, names):
+    import yada.ui.settings_window as sw
+    from yada.audio import DeviceInfo
+
+    devices = [
+        DeviceInfo(index=i, name=n, channels=1, default_samplerate=48000.0, hostapi="ALSA")
+        for i, n in enumerate(names)
+    ]
+    monkeypatch.setattr(sw, "list_input_devices", lambda: devices)
+
+
+def _stored(device):
+    s = Settings()
+    s.audio.device = device
+    return s
+
+
+def test_an_absent_microphone_is_not_saved_as_system_default(window, monkeypatch):
+    _with_devices(monkeypatch, ["Other Mic (hw:1,0)"])
+    window.load(_stored("Webcam: USB Audio (hw:3,0)"))
+    assert window.audio_device.currentData() == "Webcam: USB Audio (hw:3,0)"
+    assert "not connected" in window.audio_device.currentText()
+    assert window.collect().audio.device == "Webcam: USB Audio (hw:3,0)"
+    # An unrelated change autosaves the whole form; the microphone must survive it.
+    window.always_copy.setChecked(not window.always_copy.isChecked())
+    assert _commit(window).audio.device == "Webcam: USB Audio (hw:3,0)"
+
+
+def test_a_renumbered_microphone_stays_selected(window, monkeypatch):
+    _with_devices(monkeypatch, ["Other Mic (hw:3,0)", "Webcam: USB Audio (hw:5,0)"])
+    window.load(_stored("Webcam: USB Audio (hw:3,0)"))
+    assert window.collect().audio.device == "Webcam: USB Audio (hw:5,0)"
+
+
+def test_rescanning_keeps_an_absent_microphone(window, monkeypatch):
+    _with_devices(monkeypatch, ["Webcam: USB Audio (hw:3,0)"])
+    window.load(_stored("Webcam: USB Audio (hw:3,0)"))
+    _with_devices(monkeypatch, [])
+    window._reload_devices()
+    assert window.collect().audio.device == "Webcam: USB Audio (hw:3,0)"
+
+
+def test_system_default_is_still_a_choice(window, monkeypatch):
+    _with_devices(monkeypatch, ["Webcam: USB Audio (hw:3,0)"])
+    window.load(_stored("Webcam: USB Audio (hw:3,0)"))
+    window.audio_device.setCurrentIndex(0)
+    assert window.collect().audio.device is None
+
+
+def test_no_windows_advice_on_other_platforms(window):
+    import sys
+
+    from PySide6.QtWidgets import QLabel
+
+    if sys.platform == "win32":
+        pytest.skip("Windows text belongs on Windows")
+    texts = [label.text() for label in window.findChildren(QLabel)]
+    texts += [w.toolTip() for w in window.findChildren(QLabel)]
+    assert not [t for t in texts if "Windows" in t]

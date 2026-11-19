@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
-from ..audio import AudioCapture, AudioDeviceError, AudioTee, StreamSink, WavBuffer
+from ..audio import AudioCapture, AudioDeviceError, AudioTee, StreamSink, WavBuffer, peak_level
 from ..config import Settings
 from ..providers.base import (
     TranscribeOptions,
@@ -102,6 +102,13 @@ STREAM_CONNECT_GRACE = 3.0
 # pressed again to cancel. It ends quietly rather than as an error. A failed request still
 # reports, short or not, since that is a fault worth knowing about.
 MISPRESS_SECONDS = 1.5
+
+# A recording whose loudest sample is below this is silence: a dead input, a muted
+# microphone, a jack with nothing in it. About -42 dBFS; quiet speech into a low-gain
+# microphone still peaks well above it. Silence is never sent for transcription, because a
+# model given silence plus a vocabulary prompt answers with the vocabulary, and that came
+# back as a transcript.
+SILENCE_PEAK = 0.008
 
 # How long to let queued audio finish uploading before committing. A backlog builds while
 # the socket opens, so this covers sending it rather than just the last chunk.
@@ -361,6 +368,8 @@ class _DictationRun:
             self._deps.events.on_error(str(exc))
             return
 
+        if self._capture.substitution:
+            self._capture_warnings.append(self._capture.substitution)
         self._started_at = time.monotonic()
         self._set_state(SessionState.RECORDING)
         # After the microphone is actually open, so the chime means "listening", not
@@ -651,6 +660,15 @@ class _DictationRun:
         """Prefer the already-open stream; fall back to batch on any failure."""
         warnings: list[str] = []
         await self._settle_stream_connect(warnings)
+        if await asyncio.to_thread(peak_level, buffer.pcm16()) < SILENCE_PEAK:
+            await self._abort_stream()
+            self._heard_nothing = True
+            warnings.append(
+                "The microphone delivered only silence, so nothing was sent for "
+                "transcription. Check which microphone is selected in Settings and that it "
+                "is not muted."
+            )
+            return "", False, warnings
         if self._stream_sink is not None and self._stream_session is not None:
             self._stream_sink.flush()
             if self._pump is not None:

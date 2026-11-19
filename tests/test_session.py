@@ -35,6 +35,8 @@ class FakeCapture:
     """Stands in for PortAudio: feeds fixed frames into the tee on start()."""
 
     instances: ClassVar[list[FakeCapture]] = []
+    pcm: ClassVar[bytes] = PCM
+    substitution: ClassVar[str | None] = None
 
     def __init__(self, on_frames, *, device=None, gain=1.0, blocksize=1024):
         self.on_frames = on_frames
@@ -49,7 +51,7 @@ class FakeCapture:
             raise session_mod.AudioDeviceError("no microphone")
         self.started = True
         for _ in range(self.frames_to_send):
-            self.on_frames(PCM)
+            self.on_frames(self.pcm)
 
     def stop(self):
         self.started = False
@@ -285,6 +287,29 @@ async def test_a_longer_recording_that_hears_nothing_is_still_reported(fake_audi
         await asyncio.sleep(0.01)
     assert rec.discarded == 0
     assert "produced no text" in rec.errors[0]
+
+
+async def test_a_silent_recording_is_never_sent_for_transcription(fake_audio, monkeypatch):
+    """A dead input plus a vocabulary prompt made the model answer with the vocabulary."""
+    monkeypatch.setattr(session_mod, "MISPRESS_SECONDS", 0.0)
+    monkeypatch.setattr(fake_audio, "pcm", b"\x10\x00" * 2400)  # peak 16/32767, about -66 dB
+    stream = FakeStream(deltas=(), final="Vocabulary. Echo.")
+    stt = FakeTranscriber(streaming=True, stream=stream, batch_text="Vocabulary. Echo.")
+    sess, rec, _ = build(transcriber=stt, transformer=FakeTransformer())
+    await sess.toggle_async()
+    await sess.toggle_async()
+    assert stt.batch_calls == 0, "silence must not be uploaded"
+    assert rec.delivered == [] and rec.finished == [], "nothing may be pasted or copied"
+    assert "only silence" in rec.errors[0]
+    assert sess.state is SessionState.IDLE
+
+
+async def test_a_missing_microphone_is_said_out_loud(fake_audio, monkeypatch):
+    monkeypatch.setattr(fake_audio, "substitution", "Your microphone (X) is not connected.")
+    sess, rec, _ = build(transcriber=FakeTranscriber())
+    await sess.toggle_async()
+    await sess.toggle_async()
+    assert any("not connected" in w for w in rec.finished[0].warnings)
 
 
 async def test_a_short_recording_whose_request_fails_is_still_reported(fake_audio):

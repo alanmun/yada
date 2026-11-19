@@ -8,6 +8,7 @@ from .capture import (
     list_input_devices,
     peak_level,
     warm_up,
+    without_slot,
 )
 from .tee import AudioTee, StreamSink
 
@@ -23,4 +24,5 @@ __all__ = [
     "list_input_devices",
     "peak_level",
     "warm_up",
+    "without_slot",
 ]

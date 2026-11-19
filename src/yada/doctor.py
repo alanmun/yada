@@ -75,6 +75,9 @@ def _platform_checks() -> list[Check]:
 
 
 def _audio_checks() -> list[Check]:
+    from .audio.hostaudio import prefer_host_alsa
+
+    prefer_host_alsa()
     try:
         import sounddevice  # noqa: F401
     except OSError:
