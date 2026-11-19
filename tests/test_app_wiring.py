@@ -11,6 +11,8 @@ built in a test. This is the smallest useful version of an app-level harness.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 pytest.importorskip("PySide6")
@@ -83,6 +85,7 @@ def test_linux_launchers_use_an_icon_outside_version_directories(yada, tmp_path,
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("yada.app._refresh_menu_cache", lambda: None)
     yada.settings.start_on_login = True
     for version in ("0.1.30", "0.1.31"):
         executable = tmp_path / "versions" / version / "yada"
@@ -101,7 +104,9 @@ def test_linux_launchers_use_an_icon_outside_version_directories(yada, tmp_path,
             image = QImage(icon)
             assert not image.isNull()
             assert image.width() == 256
-            assert str(executable) in content
+            launcher = tmp_path / "home/.local/bin/yada"
+            assert f"Exec={launcher}" in content, "survives pruning of version dirs"
+            assert launcher.resolve() == executable.resolve()
             assert "StartupWMClass=yada\n" in content
 
 
@@ -399,3 +404,16 @@ def test_a_new_model_choice_survives_a_refresh_before_autosave(yada, qapp):
         window.close()
         window.deleteLater()
         qapp.processEvents()
+
+
+def test_linux_chimes_avoid_qts_pipewire_backend(monkeypatch):
+    from yada.app import _prefer_stable_audio_backend
+
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.delenv("QT_AUDIO_BACKEND", raising=False)
+    _prefer_stable_audio_backend()
+    assert os.environ["QT_AUDIO_BACKEND"] == "pulseaudio"
+
+    monkeypatch.setenv("QT_AUDIO_BACKEND", "pipewire")
+    _prefer_stable_audio_backend()
+    assert os.environ["QT_AUDIO_BACKEND"] == "pipewire", "the user's choice wins"

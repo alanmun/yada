@@ -15,4 +15,4 @@ import os
 # from extra BLAS workers.
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
-__version__ = "0.1.38"
+__version__ = "0.1.39"

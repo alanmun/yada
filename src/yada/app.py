@@ -348,6 +348,10 @@ class YadaApp(QObject):
             icon_path.write_bytes(
                 (Path(__file__).parent / "assets" / "icons" / "yada.png").read_bytes()
             )
+        # Launchers run the stable link rather than a version directory. KDE caches menu
+        # entries (ksycoca) and does not always notice a rewritten .desktop file, so an
+        # entry naming versions/<v>/yada broke the app menu once <v> was pruned.
+        launch = executable
         with contextlib.suppress(OSError):
             bin_dir = Path.home() / ".local" / "bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
@@ -355,6 +359,7 @@ class YadaApp(QObject):
             if link.is_symlink() or link.exists():
                 link.unlink()
             link.symlink_to(executable)
+            launch = link
 
         desktop = (
             "[Desktop Entry]\n"
@@ -362,7 +367,7 @@ class YadaApp(QObject):
             "Name=yada\n"
             "GenericName=Dictation\n"
             "Comment=Press a shortcut, speak, get text\n"
-            f"Exec={executable}\n"
+            f"Exec={launch}\n"
             f"Icon={icon_path}\n"
             "Terminal=false\n"
             "Categories=Utility;AudioVideo;\n"
@@ -383,11 +388,13 @@ class YadaApp(QObject):
                 autostart.mkdir(parents=True, exist_ok=True)
                 # Quiet at login, for the same reason as the Windows run key.
                 entry.write_text(
-                    desktop.replace(f"Exec={executable}", f"Exec={executable} --minimized"),
+                    desktop.replace(f"Exec={launch}", f"Exec={launch} --minimized"),
                     encoding="utf-8",
                 )
             elif entry.exists():
                 entry.unlink()
+
+        _refresh_menu_cache()
 
     def _connect(self) -> None:
         self.tray.toggle_requested.connect(self.toggle)
@@ -1382,6 +1389,7 @@ def main(
     start_recording: bool = False,
     minimized: bool = False,
 ) -> int:
+    _prefer_stable_audio_backend()
     app = QApplication(argv or [])
     app.setApplicationName("yada")
     # Deliberately no display name: Qt appends it to every window title, which turned
@@ -1414,3 +1422,36 @@ def main(
         # recording once the tray is up, so the keypress is not silently wasted.
         QTimer.singleShot(400, yada.toggle)
     return app.exec()
+
+
+def _refresh_menu_cache() -> None:
+    """Ask KDE to rebuild its application-menu cache, in the background.
+
+    Best effort: absent outside KDE, and harmless to run when nothing changed.
+    """
+    import shutil
+    import subprocess
+
+    for tool in ("kbuildsycoca6", "kbuildsycoca5"):
+        if path := shutil.which(tool):
+            with contextlib.suppress(OSError):
+                subprocess.Popen(
+                    [path],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            return
+
+
+def _prefer_stable_audio_backend() -> None:
+    """Play chimes through Qt's PulseAudio backend on Linux, not its PipeWire one.
+
+    Qt 6.11 picks PipeWire when available, and that backend segfaulted inside libpipewire
+    (thread QAudioContext, on_remote_data) when a Bluetooth headset disconnected. The
+    PulseAudio backend is older and reaches the same PipeWire server through pipewire-pulse.
+    A value the user already set wins.
+    """
+    if sys.platform.startswith("linux"):
+        os.environ.setdefault("QT_AUDIO_BACKEND", "pulseaudio")
