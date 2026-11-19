@@ -372,3 +372,21 @@ def test_no_windows_advice_on_other_platforms(window):
     texts = [label.text() for label in window.findChildren(QLabel)]
     texts += [w.toolTip() for w in window.findChildren(QLabel)]
     assert not [t for t in texts if "Windows" in t]
+
+
+def test_a_refused_mic_test_does_not_leave_its_reason_behind(window):
+    help_text = window.mic_test_note.text()
+    refuse = lambda active: active and window.stop_mic_test("Not while a dictation is running.")  # noqa: E731
+    window.mic_test_requested.connect(refuse)
+    window.mic_test.setChecked(True)
+    assert window.mic_test_note.text() == "Not while a dictation is running."
+    assert not window.mic_test.isChecked()
+    # The dictation ends, which is what the app reports through this call.
+    window.reset_mic_test_note()
+    assert window.mic_test_note.text() == help_text
+    # And a later test that is allowed to start clears a stale reason by itself.
+    window.stop_mic_test("Not while a dictation is running.")
+    window.mic_test_requested.disconnect(refuse)
+    window.mic_test.setChecked(True)
+    assert window.mic_test_note.text() == help_text
+    window.mic_test.setChecked(False)

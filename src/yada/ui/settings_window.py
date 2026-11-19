@@ -145,6 +145,14 @@ def _recommendation_lines(spec) -> list[str]:
     return lines
 
 
+_MIC_TEST_HELP = (
+    "Opens the microphone and shows what yada would hear, gain included. The bar "
+    "turns amber when the input is hot and red when it is clipping — clipping costs "
+    "accuracy, so back the gain off rather than pushing it up. Stops when this "
+    "window closes or a dictation starts."
+)
+
+
 class SettingsWindow(QWidget):
     saved = Signal(object)  # Settings
     refresh_models_requested = Signal(str)  # "transcription" | "transform"
@@ -742,7 +750,15 @@ class SettingsWindow(QWidget):
     def _on_mic_test_toggled(self, active: bool) -> None:
         self.mic_test.setText("Stop test" if active else "Test microphone")
         self.level_meter.set_active(active)
+        if active:
+            # Before the request, so a refusal can still replace it. A reason from an
+            # earlier attempt must not outlive that attempt.
+            self.reset_mic_test_note()
         self.mic_test_requested.emit(active)
+
+    def reset_mic_test_note(self) -> None:
+        """Back to the standing explanation, once a reason no longer applies."""
+        self.mic_test_note.setText(_MIC_TEST_HELP)
 
     def set_audio_level(self, level: float) -> None:
         self.level_meter.set_level(level)
@@ -1021,12 +1037,7 @@ class SettingsWindow(QWidget):
         meter_holder = QWidget()
         meter_holder.setLayout(meter_row)
         layout.addWidget(meter_holder)
-        self.mic_test_note = hint(
-            "Opens the microphone and shows what yada would hear, gain included. The bar "
-            "turns amber when the input is hot and red when it is clipping — clipping costs "
-            "accuracy, so back the gain off rather than pushing it up. Stops when this "
-            "window closes or a dictation starts."
-        )
+        self.mic_test_note = hint(_MIC_TEST_HELP)
         layout.addWidget(self.mic_test_note)
 
         paste_box = QGroupBox("Pasting")

@@ -493,6 +493,9 @@ class YadaApp(QObject):
             self._stop_level_capture()
             if self.settings_window is not None:
                 self.settings_window.stop_mic_test("Paused while a dictation is running.")
+        if state is SessionState.IDLE and self.settings_window is not None:
+            # "Not while a dictation is running" stops being true here.
+            self.settings_window.reset_mic_test_note()
 
     def _set_mic_test(self, active: bool) -> None:
         """Open or release the microphone for the settings level meter.
