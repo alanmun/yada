@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -29,7 +30,7 @@ def test_the_first_loadable_host_library_wins(monkeypatch, tmp_path):
     loaded = []
 
     def cdll(path, mode=0):
-        if path.startswith(f"{wrong_arch}/"):
+        if Path(path).parent == wrong_arch:
             raise OSError("wrong ELF class")
         loaded.append((path, mode))
 
