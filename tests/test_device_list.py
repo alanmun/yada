@@ -164,3 +164,116 @@ def test_audio_initialization_failure_is_reported_when_recording(monkeypatch, er
     microphone = capture.AudioCapture(lambda _frames: None)
     with pytest.raises(capture.AudioDeviceError, match="No audio backend available"):
         microphone.start()
+
+
+# What Linux showed after the audio service restarted: the webcam the user picked as
+# "(hw:5,0)" had become hw:3,0, and hw:5,0 now belonged to a VR headset microphone that
+# only runs at 48 kHz.
+LINUX_RENUMBERED = [
+    {
+        "name": "HD Pro Webcam C920: USB Audio (hw:3,0)",
+        "max_input_channels": 2,
+        "default_samplerate": 32000.0,
+        "hostapi": 0,
+    },
+    {
+        "name": "Valve VR Radio & HMD Mic: USB Audio (hw:5,0)",
+        "max_input_channels": 1,
+        "default_samplerate": 48000.0,
+        "hostapi": 0,
+    },
+]
+
+
+def test_a_renumbered_alsa_device_is_still_found(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    _fake_sounddevice(monkeypatch, LINUX_RENUMBERED, ["ALSA"])
+    assert capture.resolve_device("HD Pro Webcam C920: USB Audio (hw:5,0)") == 0
+
+
+class _FakeStream:
+    def __init__(self, *, device, channels, samplerate, blocksize, dtype, callback, ok_rates):
+        if samplerate not in ok_rates:
+            raise RuntimeError("Error opening InputStream: Invalid sample rate")
+        self.device, self.samplerate, self.closed = device, samplerate, False
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_linux_sd(monkeypatch, *, ok_rates):
+    """A PortAudio whose device table is stale until it is re-initialised."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    stale = [dict(LINUX_RENUMBERED[1], name="HD Pro Webcam C920: USB Audio (hw:5,0)")]
+    state = {"devices": stale, "rescans": 0, "opened": []}
+
+    class FakeSd:
+        class default:
+            device = (0, None)
+
+        @staticmethod
+        def _terminate():
+            state["devices"] = LINUX_RENUMBERED
+            state["rescans"] += 1
+
+        @staticmethod
+        def _initialize():
+            pass
+
+        @staticmethod
+        def query_devices(index=None, kind=None):
+            return state["devices"] if index is None else state["devices"][index]
+
+        @staticmethod
+        def query_hostapis():
+            return [{"name": "ALSA"}]
+
+        @staticmethod
+        def InputStream(**kwargs):
+            stream = _FakeStream(**kwargs, ok_rates=ok_rates)
+            state["opened"].append(stream)
+            return stream
+
+    monkeypatch.setitem(sys.modules, "sounddevice", FakeSd)
+    monkeypatch.setattr(capture.AudioCapture, "_make_resampler", lambda self, rate: None)
+    return state
+
+
+def test_recording_rescans_devices_and_opens_the_microphone_the_user_chose(monkeypatch):
+    state = _fake_linux_sd(monkeypatch, ok_rates={32000})
+    mic = capture.AudioCapture(lambda _: None, device="HD Pro Webcam C920: USB Audio (hw:5,0)")
+    mic.start()
+    assert state["rescans"] == 1
+    assert state["opened"][-1].device == 0, "the webcam, not whatever took over hw:5,0"
+    assert mic.input_samplerate == 32000
+    mic.stop()
+
+
+def test_a_device_rejecting_its_reported_rate_opens_at_another(monkeypatch):
+    state = _fake_linux_sd(monkeypatch, ok_rates={48000})
+    mic = capture.AudioCapture(lambda _: None, device="HD Pro Webcam C920: USB Audio (hw:3,0)")
+    mic.start()
+    assert mic.input_samplerate == 48000
+    assert state["opened"][-1].device == 0
+    mic.stop()
+
+
+def test_no_rescan_while_another_stream_is_open(monkeypatch):
+    state = _fake_linux_sd(monkeypatch, ok_rates={32000, 48000})
+    first = capture.AudioCapture(lambda _: None)
+    first.start()
+    second = capture.AudioCapture(lambda _: None)
+    second.start()
+    assert state["rescans"] == 1, "re-initialising PortAudio would kill the first stream"
+    second.stop()
+    first.stop()
+    third = capture.AudioCapture(lambda _: None)
+    third.start()
+    assert state["rescans"] == 2
+    third.stop()

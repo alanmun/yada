@@ -12,8 +12,11 @@ handed the same buffer and none of them care.
 from __future__ import annotations
 
 import dataclasses
+import re
 import sys
+import threading
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 
 import numpy as np
@@ -178,6 +181,17 @@ def warm_up() -> None:
         list_input_devices()
 
 
+# ALSA names a card by the slot the kernel gave it, "(hw:5,0)", and slots are handed out
+# in the order devices appear. A USB reset, a replug or an audio-service restart can
+# renumber them, so a stored "Webcam (hw:5,0)" may now be "Webcam (hw:3,0)" while hw:5,0
+# belongs to a different microphone. The slot is never part of a device's identity.
+_ALSA_SLOT = re.compile(r"\s*\(hw:\d+,\d+\)\s*$")
+
+
+def _without_slot(name: str) -> str:
+    return _ALSA_SLOT.sub("", " ".join(name.split())).lower()
+
+
 def resolve_device(name: str | None) -> int | None:
     """Map a stored device name back to an index.
 
@@ -199,7 +213,39 @@ def resolve_device(name: str | None) -> int | None:
     for dev in devices:
         if _device_key(dev.name) == key:
             return dev.index
+    # The same microphone under a new ALSA slot number.
+    bare = _without_slot(name)
+    for dev in devices:
+        if _without_slot(dev.name) == bare:
+            return dev.index
     return None
+
+
+# Streams this process has open. PortAudio can only re-scan devices by shutting down and
+# starting again, which would kill an open stream, so a re-scan waits until there are none.
+_open_streams = 0
+_streams_lock = threading.Lock()
+
+
+def _rescan_devices(sd) -> None:
+    """Make PortAudio see the devices as they are now, not as they were at startup.
+
+    PortAudio enumerates once, when it initialises, and on Linux it addresses ALSA devices
+    by slot number. After a renumbering (sleep, replug, audio-service restart) its stale
+    table opens whatever now sits in the old slot: the wrong microphone, or one that
+    rejects the old device's sample rate. Windows does not need this; WASAPI endpoints are
+    stable. About 15 ms on Linux. Caller holds _streams_lock.
+    """
+    if sys.platform == "win32" or _open_streams:
+        return
+    terminate = getattr(sd, "_terminate", None)
+    initialize = getattr(sd, "_initialize", None)
+    if terminate is None or initialize is None:
+        return
+    try:
+        terminate()
+    finally:
+        initialize()
 
 
 class AudioCapture:
@@ -239,34 +285,59 @@ class AudioCapture:
                 "No audio backend available (PortAudio could not be loaded)."
             ) from exc
 
-        index = resolve_device(self._device_name)
-        try:
-            info = sd.query_devices(index if index is not None else sd.default.device[0], "input")
-        except Exception as exc:
-            raise AudioDeviceError(f"Could not open the microphone: {exc}") from exc
+        global _open_streams
+        with _streams_lock:
+            try:
+                _rescan_devices(sd)
+            except Exception as exc:
+                raise AudioDeviceError(f"Could not reach the audio system: {exc}") from exc
+            index = resolve_device(self._device_name)
+            try:
+                info = sd.query_devices(
+                    index if index is not None else sd.default.device[0], "input"
+                )
+            except Exception as exc:
+                raise AudioDeviceError(f"Could not open the microphone: {exc}") from exc
 
-        self._in_rate = int(info["default_samplerate"])
-        # Mono where possible; downmix in the callback when the device insists on stereo.
-        self._channels = (
-            1 if int(info["max_input_channels"]) >= 1 else int(info["max_input_channels"])
-        )
-        self._resampler = self._make_resampler(self._in_rate)
-
-        try:
-            self._stream = sd.InputStream(
-                device=index,
-                channels=self._channels,
-                samplerate=self._in_rate,
-                blocksize=self._blocksize,
-                dtype="float32",
-                callback=self._callback,
+            # Mono where possible; downmix in the callback when the device insists on stereo.
+            self._channels = (
+                1 if int(info["max_input_channels"]) >= 1 else int(info["max_input_channels"])
             )
-            self._stream.start()
-        except Exception as exc:
+            # The device's own rate first. A raw ALSA device may not offer what it reports
+            # as its default, so try the common rates too; the resampler covers any of them.
+            native = int(info["default_samplerate"])
+            rates = [native] + [r for r in (48_000, 44_100, 32_000, 16_000) if r != native]
+            first_error: Exception | None = None
+            for rate in rates:
+                try:
+                    stream = sd.InputStream(
+                        device=index,
+                        channels=self._channels,
+                        samplerate=rate,
+                        blocksize=self._blocksize,
+                        dtype="float32",
+                        callback=self._callback,
+                    )
+                except Exception as exc:  # noqa: BLE001 - sounddevice raises PortAudioError or ValueError; try the next rate
+                    first_error = first_error or exc
+                    continue
+                self._in_rate = rate
+                self._resampler = self._make_resampler(rate)
+                try:
+                    stream.start()
+                except Exception as exc:
+                    with suppress(Exception):
+                        stream.close()
+                    self._stream = None
+                    raise AudioDeviceError(f"Could not start recording: {exc}") from exc
+                self._stream = stream
+                _open_streams += 1
+                return
             self._stream = None
-            raise AudioDeviceError(f"Could not start recording: {exc}") from exc
+            raise AudioDeviceError(f"Could not start recording: {first_error}") from first_error
 
     def stop(self) -> None:
+        global _open_streams
         stream, self._stream = self._stream, None
         if stream is not None:
             try:
@@ -274,6 +345,10 @@ class AudioCapture:
                 stream.close()
             except Exception as exc:  # noqa: BLE001 - closing a dead stream is not fatal
                 self.last_error = str(exc)
+            finally:
+                # Only once it is closed, so a re-scan cannot pull PortAudio out from under it.
+                with _streams_lock:
+                    _open_streams = max(0, _open_streams - 1)
         # Flush the resampler's tail so the final few milliseconds are not dropped.
         if self._resampler is not None:
             tail = self._flush_resampler()
