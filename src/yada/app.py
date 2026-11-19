@@ -102,6 +102,7 @@ class EventBridge(QObject):
     finished = Signal(object)
     error = Signal(str)
     warning = Signal(str)
+    discarded = Signal()
     update_status = Signal(object)
     catalog_changed = Signal()
     # Requests arriving from the IPC worker thread. Emitting a signal is thread-safe;
@@ -152,6 +153,9 @@ class EventBridge(QObject):
 
     def on_warning(self, message: str) -> None:
         self.warning.emit(message)
+
+    def on_discarded(self) -> None:
+        self.discarded.emit()
 
 
 class YadaApp(QObject):
@@ -410,6 +414,7 @@ class YadaApp(QObject):
         self.bridge.finished.connect(self._on_finished, Qt.ConnectionType.QueuedConnection)
         self.bridge.error.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self.bridge.warning.connect(self._on_warning, Qt.ConnectionType.QueuedConnection)
+        self.bridge.discarded.connect(self._on_discarded, Qt.ConnectionType.QueuedConnection)
         self.bridge.update_status.connect(
             self._on_update_status, Qt.ConnectionType.QueuedConnection
         )
@@ -1173,6 +1178,11 @@ class YadaApp(QObject):
         if self._session_state is SessionState.IDLE:
             self.overlay.report(message)
         self.tray.notify("yada", message, warning=True)
+
+    def _on_discarded(self) -> None:
+        # A mispress cancelled: nothing to report, so the panel just goes.
+        if self._session_state is SessionState.IDLE:
+            self.overlay.dismiss()
 
     def _on_update_status(self, status) -> None:
         if status is None:

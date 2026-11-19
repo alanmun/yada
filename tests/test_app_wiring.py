@@ -417,3 +417,14 @@ def test_linux_chimes_avoid_qts_pipewire_backend(monkeypatch):
     monkeypatch.setenv("QT_AUDIO_BACKEND", "pipewire")
     _prefer_stable_audio_backend()
     assert os.environ["QT_AUDIO_BACKEND"] == "pipewire", "the user's choice wins"
+
+
+def test_a_cancelled_mispress_closes_the_panel_without_a_problem(yada, qapp):
+    yada.bridge.on_state(SessionState.RECORDING)
+    qapp.processEvents()
+    assert yada.overlay.isVisible()
+    yada.bridge.on_state(SessionState.IDLE)
+    yada.bridge.on_discarded()
+    qapp.processEvents()
+    assert not yada.overlay.isVisible()
+    assert yada.tray._problem is None

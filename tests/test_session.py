@@ -142,6 +142,7 @@ class Recorder:
         self.finished: list = []
         self.errors: list[str] = []
         self.warnings: list[str] = []
+        self.discarded = 0
         self.chimes: list[Stage] = []
         self.delivered: list[tuple[str, Stage]] = []
 
@@ -159,6 +160,9 @@ class Recorder:
 
     def on_warning(self, message):
         self.warnings.append(message)
+
+    def on_discarded(self):
+        self.discarded += 1
 
 
 @pytest.fixture(autouse=True)
@@ -243,8 +247,56 @@ async def test_empty_recording_makes_no_api_call(fake_audio):
     await sess.toggle_async()
     assert stt.batch_calls == 0, "a zero-length recording must not be uploaded"
     assert rec.chimes == [Stage.LISTENING], "it did start listening, so that chime is right"
-    assert "Nothing was recorded" in rec.warnings[0]
+    assert rec.warnings == [] and rec.discarded == 1, "a double-tap is a cancel, not a fault"
     assert sess.state is SessionState.IDLE
+
+
+async def test_a_long_recording_with_no_audio_says_so(fake_audio, monkeypatch):
+    monkeypatch.setattr(session_mod, "MISPRESS_SECONDS", 0.0)
+    sess, rec, _ = build(transcriber=FakeTranscriber())
+    await sess.toggle_async()
+    fake_audio.instances[-1].frames_to_send = 0
+    sess._active._buffer.clear()
+    await sess.toggle_async()
+    assert "Nothing was recorded" in rec.warnings[0]
+
+
+async def test_a_mispress_that_hears_nothing_ends_quietly(fake_audio):
+    sess, rec, _ = build(transcriber=FakeTranscriber(batch_text=""))
+    await sess.toggle_async()
+    await sess.toggle_async()
+    for _ in range(50):
+        if rec.discarded or rec.errors:
+            break
+        await asyncio.sleep(0.01)
+    assert rec.errors == [], "no 'produced no text' for a press-and-cancel"
+    assert rec.discarded == 1
+    assert sess.state is SessionState.IDLE
+
+
+async def test_a_longer_recording_that_hears_nothing_is_still_reported(fake_audio, monkeypatch):
+    monkeypatch.setattr(session_mod, "MISPRESS_SECONDS", 0.0)
+    sess, rec, _ = build(transcriber=FakeTranscriber(batch_text=""))
+    await sess.toggle_async()
+    await sess.toggle_async()
+    for _ in range(50):
+        if rec.discarded or rec.errors:
+            break
+        await asyncio.sleep(0.01)
+    assert rec.discarded == 0
+    assert "produced no text" in rec.errors[0]
+
+
+async def test_a_short_recording_whose_request_fails_is_still_reported(fake_audio):
+    sess, rec, _ = build(transcriber=FakeTranscriber(batch_fails="401 bad key"))
+    await sess.toggle_async()
+    await sess.toggle_async()
+    for _ in range(50):
+        if rec.discarded or rec.errors:
+            break
+        await asyncio.sleep(0.01)
+    assert rec.discarded == 0
+    assert "401 bad key" in rec.errors[0]
 
 
 

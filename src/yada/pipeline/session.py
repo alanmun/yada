@@ -74,6 +74,7 @@ class SessionEvents(Protocol):
     def on_finished(self, result: SessionResult) -> None: ...
     def on_error(self, message: str) -> None: ...
     def on_warning(self, message: str) -> None: ...
+    def on_discarded(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -96,6 +97,11 @@ class SessionDeps:
 # How long a stop will wait for a socket that is still opening. Long enough to cover a slow
 # connect, short enough that a dead network does not hold the transcript hostage.
 STREAM_CONNECT_GRACE = 3.0
+
+# A recording shorter than this that hears nothing was a mispress: the shortcut pressed and
+# pressed again to cancel. It ends quietly rather than as an error. A failed request still
+# reports, short or not, since that is a fault worth knowing about.
+MISPRESS_SECONDS = 1.5
 
 # How long to let queued audio finish uploading before committing. A backlog builds while
 # the socket opens, so this covers sending it rather than just the last chunk.
@@ -259,6 +265,9 @@ class _RunEvents:
     def on_warning(self, message: str) -> None:
         self.owner._deps.events.on_warning(message)
 
+    def on_discarded(self) -> None:
+        self.owner._deps.events.on_discarded()
+
 
 class _DictationRun:
     def __init__(self, loop: asyncio.AbstractEventLoop, deps: SessionDeps) -> None:
@@ -277,6 +286,7 @@ class _DictationRun:
         self._stream_connect: asyncio.Task | None = None
         self._partial = ""
         self._transcription_result: TranscriptionResult | None = None
+        self._heard_nothing = False
         self._started_at = 0.0
         self._duration_seconds = 0.0
         self._capture_warnings: list[str] = []
@@ -439,7 +449,10 @@ class _DictationRun:
             if buffer is None or buffer.is_empty:
                 await self._abort_stream()
                 self._reset()
-                self._deps.events.on_warning("Nothing was recorded.")
+                if duration < MISPRESS_SECONDS:
+                    self._deps.events.on_discarded()
+                else:
+                    self._deps.events.on_warning("Nothing was recorded.")
                 return
             if buffer.truncated:
                 warnings.append("Recording hit the length cap and was truncated.")
@@ -456,6 +469,11 @@ class _DictationRun:
             # Transcription can overlap earlier work; output and cleanup keep speech order.
             if self.previous is not None:
                 await asyncio.shield(self.previous)
+
+            if not transcript and self._heard_nothing and duration < MISPRESS_SECONDS:
+                self._reset()
+                self._deps.events.on_discarded()
+                return
 
             if not transcript:
                 self._reset()
@@ -674,6 +692,8 @@ class _DictationRun:
             warnings.append(_batch_failure_note(opts.model, exc))
             return "", False, warnings
         self._transcription_result = result
+        # The provider answered and found no speech, as opposed to the request failing.
+        self._heard_nothing = not result.text
         if result.model != opts.model:
             warnings.append(
                 f"The recording was transcribed with {result.model} instead of {opts.model}."
