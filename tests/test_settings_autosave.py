@@ -78,7 +78,7 @@ def test_loading_does_not_trigger_a_save(window):
     and would overwrite settings with what was just read."""
     window._saves.clear()
     settings = Settings()
-    settings.vocabulary.terms = ["Troutwood"]
+    settings.vocabulary.terms = ["Kubernetes"]
     window.load(settings)
     assert window._save_timer.isActive() is False
     assert window._saves == []

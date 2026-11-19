@@ -62,9 +62,9 @@ OPTS = TransformOptions(model="gpt-5.6-luna")
 
 
 def test_literal_find_replace():
-    step = TransformStep(type="find_replace", find="trout wood", replace="Troutwood")
-    text, err = apply_find_replace(step, "I work at trout wood today")
-    assert text == "I work at Troutwood today"
+    step = TransformStep(type="find_replace", find="cooper netties", replace="Kubernetes")
+    text, err = apply_find_replace(step, "I deploy to cooper netties today")
+    assert text == "I deploy to Kubernetes today"
     assert err is None
 
 
@@ -93,8 +93,8 @@ def test_empty_find_is_a_noop():
 
 
 def test_vocabulary_block_lists_terms():
-    block = vocabulary_block(Vocabulary(terms=["Troutwood", "DynamoDB", "  "]))
-    assert "- Troutwood" in block and "- DynamoDB" in block
+    block = vocabulary_block(Vocabulary(terms=["Kubernetes", "DynamoDB", "  "]))
+    assert "- Kubernetes" in block and "- DynamoDB" in block
     assert "  \n" not in block.replace("- ", ""), "blank terms should be dropped"
 
 
@@ -187,11 +187,11 @@ async def test_prompt_transform_receives_vocabulary_and_text():
     fake = FakeTransformer(reply="Polished.")
     steps = [TransformStep(type="prompt_transform", system_prompt="Fix it.")]
     out = await run_steps(
-        "raw text", steps, provider=fake, options=OPTS, vocabulary=Vocabulary(terms=["Troutwood"])
+        "raw text", steps, provider=fake, options=OPTS, vocabulary=Vocabulary(terms=["Kubernetes"])
     )
     assert out.text == "Polished."
     system, user = fake.calls[0]
-    assert "Troutwood" in system
+    assert "Kubernetes" in system
     assert "raw text" in user
     assert out.total_cost_usd == pytest.approx(0.0001)
 

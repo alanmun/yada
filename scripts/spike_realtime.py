@@ -82,7 +82,7 @@ async def probe_stream(model: str) -> None:
     print(f"\n=== streaming round trip ({model}) ===")
     opts = TranscribeOptions(
         model=model,
-        keywords=["Troutwood", "yada", "DynamoDB"],
+        keywords=["Kubernetes", "yada", "DynamoDB"],
         prompt="A developer dictating notes about software.",
         languages=["en"],
         delay="minimal",

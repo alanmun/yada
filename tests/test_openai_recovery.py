@@ -223,7 +223,7 @@ async def test_cancelled_session_confirmation_closes_socket(monkeypatch):
 @pytest.mark.parametrize(
     "keywords,languages",
     [
-        (("Troutwood", "Yazid", "Finn", "Yada"), ("en",)),
+        (("Kubernetes", "Priya", "Mateo", "Yada"), ("en",)),
         (("one",), ("en", "es")),
         ((), ()),
     ],
