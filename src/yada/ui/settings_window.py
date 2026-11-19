@@ -802,7 +802,7 @@ class SettingsWindow(QWidget):
                 "a second line of defence."
             )
         )
-        self.vocab_terms = StringListEditor(placeholder="e.g. Troutwood")
+        self.vocab_terms = StringListEditor(placeholder="e.g. Kubernetes")
         layout.addWidget(labelled("Terms and their correct spellings", self.vocab_terms), 1)
 
         self.vocab_context = PromptEditor(
