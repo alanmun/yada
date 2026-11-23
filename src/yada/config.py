@@ -72,7 +72,7 @@ class TranscriptionSettings:
     auto_select_newest: bool = True
     # minimal|low|medium|high|xhigh where supported. Docs warn actual latency varies by
     # configuration, so this is a dial to benchmark, not a promise.
-    delay: str = "minimal"
+    delay: str = "medium"
 
 
 @dataclass(slots=True)

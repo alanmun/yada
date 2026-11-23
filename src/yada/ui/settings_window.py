@@ -1415,11 +1415,8 @@ class SettingsWindow(QWidget):
     def _select(self, combo: QComboBox, value) -> None:
         """Show `value`, or record that this combo could not.
 
-        Deliberately does *not* fall back to index 0. In every combo here index 0 is the
-        default -- "off", "blue", "minimal", "openai" -- so snapping there turned "this
-        value is not in the list" into "the user chose the default", and the next autosave
-        wrote that over their setting. The same shape of bug replaced a configured model
-        with the newest one and a stored microphone with the system default.
+        Falling back to the first item would make autosave treat an unavailable stored
+        value as a new selection and overwrite the setting.
         """
         index = combo.findData(value)
         if index >= 0:
