@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import secrets
-from ..audio import list_input_devices, without_slot
+from ..audio import find_input_device_name, list_input_devices
 from ..config import Settings
 from ..hotkey import available_backends, toggle_command
 from ..output import create_paste_backend, sounds
@@ -203,6 +203,7 @@ class SettingsWindow(QWidget):
         # Combos whose stored value was not among their options, so `collect` must keep
         # the stored value rather than report whatever the combo happens to be showing.
         self._unresolved: set[QComboBox] = set()
+        self._unavailable_audio_device: str | None = None
 
         # Built before the tabs, because the Updates tab places it. Only appears once an
         # update is downloaded and waiting: restarting is the whole install step, so the
@@ -1001,8 +1002,7 @@ class SettingsWindow(QWidget):
                     "Stored by name, not by position, so unplugging a headset will not silently "
                     "switch you to the wrong microphone."
                     + (
-                        " Windows lists each microphone once per audio subsystem; yada "
-                        "shows one entry per device and uses the best of them."
+                        " On Windows, the picker uses the inputs from Windows Sound settings."
                         if sys.platform == "win32"
                         else ""
                     )
@@ -1197,7 +1197,7 @@ class SettingsWindow(QWidget):
         self.chime_transformation.set_library(library, current=transformation)
 
     def _reload_devices(self) -> None:
-        current = self.audio_device.currentData()
+        current = self._current_audio_device()
         self.audio_device.clear()
         self.audio_device.addItem("System default", None)
         for dev in list_input_devices():
@@ -1374,14 +1374,7 @@ class SettingsWindow(QWidget):
         s.hotkey.combo = self._last_valid_combo or "ctrl+shift+;"
         s.hotkey.backend = self._chosen(self.hotkey_backend, self._settings.hotkey.backend)
 
-        # The stored microphone survives anything this combo failed to show. "System
-        # default" is saved only when it is what the combo was told to show or what the
-        # user picked.
-        s.audio.device = (
-            self._settings.audio.device
-            if self.audio_device in self._unresolved
-            else self.audio_device.currentData()
-        )
+        s.audio.device = self._current_audio_device()
         s.audio.input_gain = float(self.audio_gain.value())
 
         s.theme = self._chosen(self.theme_combo, self._settings.theme)
@@ -1435,30 +1428,28 @@ class SettingsWindow(QWidget):
         else:
             self._unresolved.add(combo)
 
-    def _select_device(self, stored: str | None) -> None:
-        """Show the stored microphone, whatever has happened to the device list.
+    def _current_audio_device(self) -> str | None:
+        if self.audio_device in self._unresolved:
+            return self._unavailable_audio_device or self._settings.audio.device
+        return self.audio_device.currentData()
 
-        The combo's first entry is "System default", so a stored microphone that is not
-        in the list must never leave the combo sitting there: the next autosave would
-        write the default over the user's choice. A device the kernel renumbered is
-        matched without its slot; one that is absent gets its own "(not connected)" entry.
-        """
+    def _select_device(self, stored: str | None) -> None:
+        """Restore the saved microphone across changes to the available inputs."""
         combo = self.audio_device
         self._unresolved.discard(combo)
+        self._unavailable_audio_device = None
         if not stored:
             combo.setCurrentIndex(0)
             return
-        index = combo.findData(stored)
-        if index < 0:
-            bare = without_slot(stored)
-            index = next(
-                (
-                    i
-                    for i in range(1, combo.count())
-                    if without_slot(str(combo.itemData(i))) == bare
-                ),
-                -1,
-            )
+        names = [combo.itemData(i) for i in range(1, combo.count())]
+        name = find_input_device_name(stored, names)
+        index = combo.findData(name) if name is not None else -1
+        if index < 0 and sys.platform == "win32":
+            self._unavailable_audio_device = stored
+            self._unresolved.add(combo)
+            combo.setPlaceholderText("Saved microphone unavailable")
+            combo.setCurrentIndex(-1)
+            return
         if index < 0:
             combo.addItem(f"{stored}  (not connected)", stored)
             index = combo.count() - 1

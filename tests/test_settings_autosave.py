@@ -313,7 +313,7 @@ def test_the_text_scale_fallback_is_not_a_different_default(qapp, window):
 # -- the microphone choice is never replaced by "System default" -----------------------
 
 
-def _with_devices(monkeypatch, names):
+def _with_devices(monkeypatch, names, *, platform="linux"):
     import yada.ui.settings_window as sw
     from yada.audio import DeviceInfo
 
@@ -321,6 +321,7 @@ def _with_devices(monkeypatch, names):
         DeviceInfo(index=i, name=n, channels=1, default_samplerate=48000.0, hostapi="ALSA")
         for i, n in enumerate(names)
     ]
+    monkeypatch.setattr(sw.sys, "platform", platform)
     monkeypatch.setattr(sw, "list_input_devices", lambda: devices)
 
 
@@ -359,6 +360,28 @@ def test_system_default_is_still_a_choice(window, monkeypatch):
     _with_devices(monkeypatch, ["Webcam: USB Audio (hw:3,0)"])
     window.load(_stored("Webcam: USB Audio (hw:3,0)"))
     window.audio_device.setCurrentIndex(0)
+    assert window.collect().audio.device is None
+
+
+def test_windows_picker_reuses_the_real_endpoint_for_a_saved_mme_name(window, monkeypatch):
+    name = "Microphone Array (Intel® Smart Sound Technology for Digital Microphones)"
+    _with_devices(monkeypatch, [name], platform="win32")
+    window.load(_stored(name[:31]))
+    assert window.audio_device.count() == 2
+    assert window.audio_device.currentData() == name
+
+
+def test_windows_picker_preserves_a_missing_selection_without_listing_it(window, monkeypatch):
+    _with_devices(monkeypatch, ["Microphone Array"], platform="win32")
+    saved = "Microphone Array 2 ()"
+    window.load(_stored(saved))
+    window._reload_devices()
+    assert window.audio_device.count() == 2
+    assert window.audio_device.currentIndex() == -1
+    assert window.collect().audio.device == saved
+
+    window.audio_device.setCurrentIndex(0)
+    window.audio_device.activated.emit(0)
     assert window.collect().audio.device is None
 
 

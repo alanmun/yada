@@ -45,43 +45,14 @@ class DeviceInfo:
     hostapi: str = ""
 
 
-# Windows exposes one physical microphone through several host APIs -- WASAPI, DirectSound,
-# MME, WDM-KS -- so PortAudio enumerates the same device two to four times and the dropdown
-# reads as every microphone being duplicated. Preference order, best first: WASAPI is the
-# modern path, and MME is last because it truncates device names to 31 characters (which is
-# why a stored device name can be cut off mid-word).
-_HOSTAPI_PREFERENCE = (
-    "Windows WASAPI",
-    "Windows DirectSound",
-    "Windows WDM-KS",
-)
-# Below everything, including an API we do not recognise: MME is the legacy path and the
-# one that truncates names.
-_HOSTAPI_LAST = "MME"
+_WASAPI = "Windows WASAPI"
 
 # MME's name limit. Used to match a truncated name against its full-length twin.
 _MME_NAME_LIMIT = 31
 
 
-def _hostapi_rank(name: str) -> int:
-    if name == _HOSTAPI_LAST:
-        return len(_HOSTAPI_PREFERENCE) + 1
-    try:
-        return _HOSTAPI_PREFERENCE.index(name)
-    except ValueError:
-        return len(_HOSTAPI_PREFERENCE)
-
-
 def _device_key(name: str) -> str:
-    """Identity of a physical device, tolerant of MME truncating the name.
-
-    The truncation tolerance is Windows-only, and deliberately so. ALSA device names
-    commonly share a long prefix and differ at the very end -- "... (hw:1,0)" against
-    "... (hw:2,0)" -- so trimming to 31 characters there would merge two real microphones
-    into one and hide a device the user needs.
-    """
-    normalized = " ".join(name.split()).lower()
-    return normalized[:_MME_NAME_LIMIT] if sys.platform == "win32" else normalized
+    return " ".join(name.split()).lower()
 
 
 def list_input_devices() -> list[DeviceInfo]:
@@ -98,15 +69,31 @@ def list_input_devices() -> list[DeviceInfo]:
     try:
         default_in = sd.default.device[0]
         devices = sd.query_devices()
-        hostapis = [str(api.get("name", "")) for api in sd.query_hostapis()]
+        apis = sd.query_hostapis()
+        hostapis = [str(api.get("name", "")) for api in apis]
     except Exception as exc:
         raise AudioDeviceError(f"Could not enumerate audio devices: {exc}") from exc
+
+    windows = sys.platform == "win32"
+    is_loopback = None
+    if windows:
+        if _WASAPI not in hostapis:
+            return []
+        default_in = apis[hostapis.index(_WASAPI)]["default_input_device"]
+        # PortAudio builds with WASAPI loopback support can expose playback as inputs.
+        is_loopback = getattr(getattr(sd, "_lib", None), "PaWasapi_IsLoopback", None)
 
     found: list[DeviceInfo] = []
     for idx, dev in enumerate(devices):
         if int(dev.get("max_input_channels", 0)) <= 0:
             continue
         api_index = int(dev.get("hostapi", -1))
+        hostapi = hostapis[api_index] if 0 <= api_index < len(hostapis) else ""
+        # The other Windows APIs expose duplicate aliases and raw driver pins.
+        if windows and hostapi != _WASAPI:
+            continue
+        if is_loopback is not None and is_loopback(idx) == 1:
+            continue
         found.append(
             DeviceInfo(
                 index=idx,
@@ -114,36 +101,27 @@ def list_input_devices() -> list[DeviceInfo]:
                 channels=int(dev["max_input_channels"]),
                 default_samplerate=float(dev.get("default_samplerate") or 0.0),
                 is_default=(idx == default_in),
-                hostapi=hostapis[api_index] if 0 <= api_index < len(hostapis) else "",
+                hostapi=hostapi,
             )
         )
 
-    # One entry per physical device: the best host API for the stream, and the fullest name
-    # for the label, since the preferred API is not always the one with the longest name.
-    best: dict[str, DeviceInfo] = {}
+    # Keep one entry for each distinct saved name, with its longest spelling and default flag.
+    by_name: dict[str, DeviceInfo] = {}
     labels: dict[str, str] = {}
     defaults: set[str] = set()
     for dev in found:
         key = _device_key(dev.name)
         labels[key] = max(labels.get(key, ""), dev.name, key=len)
-        # Being the system default belongs to the device, not to the enumeration that
-        # happened to carry the flag -- which is usually MME's, the one that loses on rank.
-        # Reading it off the winner alone dropped the marker entirely.
         if dev.is_default:
             defaults.add(key)
-        incumbent = best.get(key)
-        if incumbent is None or _hostapi_rank(dev.hostapi) < _hostapi_rank(incumbent.hostapi):
-            best[key] = dev
+            if windows:
+                by_name[key] = dev
+        by_name.setdefault(key, dev)
 
-    # Sorted by index so the order is stable and matches the host's own enumeration,
-    # rather than whatever order the grouping happened to produce.
-    return sorted(
-        (
-            dataclasses.replace(dev, name=labels[key], is_default=key in defaults)
-            for key, dev in best.items()
-        ),
-        key=lambda dev: dev.index,
-    )
+    return [
+        dataclasses.replace(dev, name=labels[key], is_default=key in defaults)
+        for key, dev in by_name.items()
+    ]
 
 
 def peak_level(pcm16: bytes) -> float:
@@ -194,7 +172,25 @@ def without_slot(name: str) -> str:
     return _ALSA_SLOT.sub("", " ".join(name.split())).lower()
 
 
-def resolve_device(name: str | None) -> int | None:
+def find_input_device_name(name: str, available: list[str]) -> str | None:
+    """Find the current name for a saved microphone."""
+    if name in available:
+        return name
+    key = _device_key(name)
+    for candidate in available:
+        if _device_key(candidate) == key:
+            return candidate
+    # Older Windows settings may contain MME's truncated name. Require a unique match.
+    if sys.platform == "win32" and len(name) == _MME_NAME_LIMIT and key:
+        matches = [candidate for candidate in available if _device_key(candidate).startswith(key)]
+        if len(matches) == 1:
+            return matches[0]
+    # The same microphone under a new ALSA slot number.
+    bare = without_slot(name)
+    return next((candidate for candidate in available if without_slot(candidate) == bare), None)
+
+
+def resolve_device(name: str | None, *, devices: list[DeviceInfo] | None = None) -> int | None:
     """Map a stored device name back to an index.
 
     Names are stored rather than indices because indices are reassigned when hardware is
@@ -204,23 +200,10 @@ def resolve_device(name: str | None) -> int | None:
     """
     if not name:
         return None
-    devices = list_input_devices()
-    for dev in devices:
-        if dev.name == name:
-            return dev.index
-    # A name stored before deduplication can be MME's 31-character truncation of the same
-    # device. Matching on the shared key keeps an existing setting working rather than
-    # silently reassigning the user to the system default.
-    key = _device_key(name)
-    for dev in devices:
-        if _device_key(dev.name) == key:
-            return dev.index
-    # The same microphone under a new ALSA slot number.
-    bare = without_slot(name)
-    for dev in devices:
-        if without_slot(dev.name) == bare:
-            return dev.index
-    return None
+    if devices is None:
+        devices = list_input_devices()
+    current = find_input_device_name(name, [dev.name for dev in devices])
+    return next((dev.index for dev in devices if dev.name == current), None)
 
 
 # Streams this process has open. PortAudio can only re-scan devices by shutting down and
@@ -298,13 +281,21 @@ class AudioCapture:
                 _rescan_devices(sd)
             except Exception as exc:
                 raise AudioDeviceError(f"Could not reach the audio system: {exc}") from exc
-            index = resolve_device(self._device_name)
+            windows_devices = list_input_devices() if sys.platform == "win32" else None
+            index = resolve_device(self._device_name, devices=windows_devices)
             self.substitution = (
                 f"Your microphone ({self._device_name}) is not connected, so this used the "
                 "system default instead."
                 if self._device_name and index is None
                 else None
             )
+            if windows_devices is not None and index is None:
+                index = next((dev.index for dev in windows_devices if dev.is_default), None)
+                if index is None:
+                    raise AudioDeviceError(
+                        "Windows has no default microphone. Choose one in Windows Settings > "
+                        "System > Sound > Input and restart yada, or select an input in yada."
+                    )
             try:
                 info = sd.query_devices(
                     index if index is not None else sd.default.device[0], "input"

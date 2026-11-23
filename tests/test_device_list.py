@@ -9,24 +9,34 @@ stored device name can be cut off mid-word.
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from yada.audio import capture
 
 
-def _fake_sounddevice(monkeypatch, devices, hostapis, default_in=0):
+def _fake_sounddevice(monkeypatch, devices, hostapis, default_in=0, wasapi_default=1):
     class FakeSd:
         class default:  # lowercase to mirror sounddevice's own shape
             device = (default_in, None)
 
         @staticmethod
-        def query_devices():
-            return devices
+        def query_devices(index=None, kind=None):
+            if index is None:
+                return devices
+            assert index >= 0, "an unavailable default must not be passed to PortAudio"
+            return devices[index]
 
         @staticmethod
         def query_hostapis():
-            return [{"name": name} for name in hostapis]
+            return [
+                {
+                    "name": name,
+                    "default_input_device": wasapi_default if name == "Windows WASAPI" else -1,
+                }
+                for name in hostapis
+            ]
 
     monkeypatch.setitem(sys.modules, "sounddevice", FakeSd)
 
@@ -90,7 +100,7 @@ def test_the_fullest_name_is_kept(monkeypatch):
     assert rode.name.endswith(")"), "the truncated MME name would be missing its bracket"
 
 
-def test_the_best_host_api_wins_the_stream(monkeypatch):
+def test_windows_uses_wasapi_device_properties(monkeypatch):
     _fake_sounddevice(monkeypatch, WINDOWS_LIKE, HOSTAPIS)
     rode = capture.list_input_devices()[0]
     assert rode.hostapi == "Windows WASAPI"
@@ -115,21 +125,81 @@ def test_outputs_are_not_offered_as_inputs(monkeypatch):
     assert not any("Speakers" in d.name for d in capture.list_input_devices())
 
 
-def test_the_system_default_survives_deduplication(monkeypatch):
-    """Its flag must not be lost with the enumeration it happened to come from."""
+def test_windows_picker_uses_wasapi_endpoints_and_keeps_distinct_long_names(monkeypatch):
+    devices = [
+        *WINDOWS_LIKE,
+        dict(WINDOWS_LIKE[0], name="Microsoft Sound Mapper - Input"),
+        dict(WINDOWS_LIKE[1], name="Desktop Microphone (RØDE PodMic 2)"),
+        dict(WINDOWS_LIKE[1], name="PC Speaker (Realtek HD Audio output)", hostapi=3),
+    ]
+    _fake_sounddevice(monkeypatch, devices, [*HOSTAPIS, "Windows WDM-KS"])
+    assert [d.index for d in capture.list_input_devices()] == [1, 3, 6]
+    assert capture.resolve_device("Desktop Microphone (RØDE PodMic") is None
+
+
+def test_windows_picker_does_not_offer_legacy_inputs_without_wasapi(monkeypatch):
+    devices = [WINDOWS_LIKE[0], dict(WINDOWS_LIKE[2], hostapi=1)]
+    _fake_sounddevice(monkeypatch, devices, ["MME", "Windows DirectSound"])
+    assert capture.list_input_devices() == []
+
+
+def test_windows_picker_excludes_wasapi_playback_loopback(monkeypatch):
+    devices = [
+        WINDOWS_LIKE[1],
+        dict(WINDOWS_LIKE[1], name="Speaker output capture"),
+    ]
+    _fake_sounddevice(monkeypatch, devices, HOSTAPIS, wasapi_default=0)
+    monkeypatch.setattr(
+        sys.modules["sounddevice"],
+        "_lib",
+        SimpleNamespace(PaWasapi_IsLoopback=lambda index: int(index == 1)),
+        raising=False,
+    )
+    assert [device.index for device in capture.list_input_devices()] == [0]
+
+
+@pytest.mark.parametrize(
+    ("device", "wasapi_default"), [(None, 1), ("Desktop Microphone (RØDE PodMic)", -1)]
+)
+def test_windows_capture_uses_the_wasapi_input(monkeypatch, device, wasapi_default):
+    _fake_sounddevice(
+        monkeypatch, WINDOWS_LIKE, HOSTAPIS, default_in=-1, wasapi_default=wasapi_default
+    )
+    opened = []
+
+    def input_stream(**kwargs):
+        stream = _FakeStream(**kwargs, ok_rates={48000})
+        opened.append(stream)
+        return stream
+
+    monkeypatch.setattr(sys.modules["sounddevice"], "InputStream", input_stream, raising=False)
+    monkeypatch.setattr(capture.AudioCapture, "_make_resampler", lambda self, rate: None)
+    mic = capture.AudioCapture(lambda _: None, device=device)
+    mic.start()
+    mic.stop()
+    assert [stream.device for stream in opened] == [1]
+
+
+def test_windows_without_a_default_reports_how_to_select_one(monkeypatch):
+    raw_device = dict(WINDOWS_LIKE[1], name="Microphone 1 (Realtek HD Audio)", hostapi=1)
+    _fake_sounddevice(monkeypatch, [raw_device], ["Windows WASAPI", "Windows WDM-KS"], -1, -1)
+    mic = capture.AudioCapture(lambda _: None)
+    with pytest.raises(capture.AudioDeviceError, match="System > Sound > Input"):
+        mic.start()
+    assert capture.list_input_devices() == []
+
+
+def test_picker_marks_the_wasapi_default(monkeypatch):
     _fake_sounddevice(monkeypatch, WINDOWS_LIKE, HOSTAPIS, default_in=0)
     rode = capture.list_input_devices()[0]
     assert rode.is_default is True
 
 
-def test_host_api_preference_order():
-    assert (
-        capture._hostapi_rank("Windows WASAPI")
-        < capture._hostapi_rank("Windows DirectSound")
-        < capture._hostapi_rank("Windows WDM-KS")
-        < capture._hostapi_rank("ALSA")  # unknown
-        < capture._hostapi_rank("MME")  # legacy, and the one that truncates
-    )
+def test_a_duplicate_name_uses_the_actual_windows_default_index(monkeypatch):
+    devices = [WINDOWS_LIKE[1], WINDOWS_LIKE[1]]
+    _fake_sounddevice(monkeypatch, devices, HOSTAPIS, wasapi_default=1)
+    (device,) = capture.list_input_devices()
+    assert device.is_default and device.index == 1
 
 
 @pytest.mark.parametrize("error", [ImportError, OSError, RuntimeError])

@@ -2,6 +2,8 @@
 
 ## Cutting a release
 
+After making changes to yada, cut and verify a new release before handing the work back.
+
 1. **Check the recommended models are still current** (see below). Once per coding
    session: if you already ran it for an earlier release in this session, skip it.
 2. Wait for CI on the commit you are releasing to pass on Linux and Windows.
