@@ -80,8 +80,11 @@ def list_input_devices() -> list[DeviceInfo]:
         if _WASAPI not in hostapis:
             return []
         default_in = apis[hostapis.index(_WASAPI)]["default_input_device"]
-        # PortAudio builds with WASAPI loopback support can expose playback as inputs.
-        is_loopback = getattr(getattr(sd, "_lib", None), "PaWasapi_IsLoopback", None)
+        # PortAudio builds with loopback support expose playback as inputs. Older DLLs
+        # can lack the symbol even when sounddevice's CFFI binding declares it.
+        if portaudio := getattr(sd, "_lib", None):
+            with suppress(sd._ffi.error):
+                is_loopback = getattr(portaudio, "PaWasapi_IsLoopback", None)
 
     found: list[DeviceInfo] = []
     for idx, dev in enumerate(devices):

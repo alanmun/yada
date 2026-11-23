@@ -12,12 +12,15 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from _sounddevice import ffi
 
 from yada.audio import capture
 
 
 def _fake_sounddevice(monkeypatch, devices, hostapis, default_in=0, wasapi_default=1):
     class FakeSd:
+        _ffi = ffi
+
         class default:  # lowercase to mirror sounddevice's own shape
             device = (default_in, None)
 
@@ -156,6 +159,18 @@ def test_windows_picker_excludes_wasapi_playback_loopback(monkeypatch):
         raising=False,
     )
     assert [device.index for device in capture.list_input_devices()] == [0]
+
+
+def test_windows_picker_handles_portaudio_without_a_loopback_symbol(monkeypatch):
+    class PortAudio:
+        @property
+        def PaWasapi_IsLoopback(self):
+            raise ffi.error("PaWasapi_IsLoopback symbol not found")
+
+    _fake_sounddevice(monkeypatch, WINDOWS_LIKE, HOSTAPIS)
+    sd = sys.modules["sounddevice"]
+    monkeypatch.setattr(sd, "_lib", PortAudio(), raising=False)
+    assert [device.index for device in capture.list_input_devices()] == [1, 3]
 
 
 @pytest.mark.parametrize(
